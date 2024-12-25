@@ -8,6 +8,9 @@ from typing import Optional, List
 from todoist_api_python.api import TodoistAPI
 from datetime import datetime
 
+from playwright.sync_api import sync_playwright
+from typing import Optional, Dict, Any
+
 def get_api_key() -> str:
     """Get Todoist API key from environment variables."""
     api_key = os.getenv('TODOIST_API_KEY')
@@ -15,17 +18,41 @@ def get_api_key() -> str:
         raise ValueError("TODOIST_API_KEY environment variable not set")
     return api_key
 
-def scrape_url(url: str) -> Optional[str]:
+def scrape_url(url: str, selectors: Dict[str, str] = None, wait_for: str = None) -> Optional[Dict[str, Any]]:
     """
-    Scrape content from a URL.
-    This is a basic implementation that can be replaced with a more sophisticated one.
+    Scrape content from a URL using Playwright.
+    
+    Args:
+        url: Target URL
+        selectors: Dict of name:selector pairs to extract specific elements
+        wait_for: CSS selector to wait for before scraping
+    
+    Returns:
+        Dict containing scraped data or None if failed
     """
     try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.text
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url)
+            
+            if wait_for:
+                page.wait_for_selector(wait_for)
+                
+            result = {}
+            
+            if selectors:
+                for name, selector in selectors.items():
+                    elements = page.query_selector_all(selector)
+                    result[name] = [el.inner_text() for el in elements]
+            else:
+                result['content'] = page.content()
+                
+            browser.close()
+            return result
+            
     except Exception as e:
-        print(f"Error scraping URL {url}: {str(e)}")
+        print(f"Error scraping {url}: {str(e)}")
         return None
 
 def process_task(api: TodoistAPI, task, mark_closed: bool) -> dict:
