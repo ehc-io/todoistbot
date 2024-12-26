@@ -230,7 +230,8 @@ class URLScraper:
             """
             
             # Generate summary using LLM
-            prompt = f"""Please provide a 100 word summary of this GitHub project. Disregard whatever is related to the Github service itself. Consider only information related to the particular project this page points to.
+            prompt = f"""Please provide a 100 word summary of this GitHub project.
+            Disregard whatever is related to the Github service itself. Consider only information related to the particular project this page points to.
             
             Repository Content:
             {content_for_summary}"""
