@@ -4,6 +4,7 @@ import os
 import base64
 import tempfile
 import requests
+import pypandoc
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
 from datetime import datetime
@@ -13,6 +14,7 @@ import PyPDF2
 from io import BytesIO
 
 class URLScraper:
+    # [Previous methods remain unchanged up to scrape_url]
     @staticmethod
     def clean_url(url: str) -> str:
         """Clean and normalize URL."""
@@ -87,6 +89,31 @@ class URLScraper:
             return ""
 
     @staticmethod
+    def get_webpage_summary(text: str) -> str:
+        """Get summary of webpage content using LLM."""
+        try:
+            # Truncate text if too long (adjust limit based on model's context window)
+            max_chars = 14000  # Adjust based on model's limits
+            if len(text) > max_chars:
+                text = text[:max_chars] + "..."
+
+            prompt = f"""Please provide a 100 word summary of this webpage content. 
+            Focus on the main points and key information.
+            
+            Content:
+            {text}"""
+            
+            messages = [{ "content": prompt, "role": "user"}]
+            
+            response = completion(model="gpt-4o-mini", messages=messages)
+            
+            return response.choices[0].message.content if response.choices else "Summary generation failed."
+            
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error generating webpage summary: {str(e)}")
+            return "Error generating summary"
+
+    @staticmethod
     def get_pdf_summary(text: str) -> str:
         """Get summary of PDF content using LLM."""
         try:
@@ -132,15 +159,14 @@ class URLScraper:
                 'url': url,
                 'error': 'Failed to extract text from PDF'
             }
-        # print('----')
-        # print(text_content)
-        # print('----')
+
         # Generate summary
         summary = URLScraper.get_pdf_summary(text_content)
-        print(summary)
+        # print(summary)
         return {
             'type': 'pdf',
             'url': url,
+            'content' : text_content,
             'summary': summary
         }
 
@@ -194,6 +220,36 @@ class URLScraper:
             return None
 
     @staticmethod
+    def extract_content_with_pandoc(html: str) -> str:
+        """Extract text content from HTML using Pandoc."""
+        try:
+            # Create a temporary file for the HTML content
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as tmp:
+                tmp.write(html)
+                tmp_path = tmp.name
+
+            try:
+                # Convert HTML to plain text using Pandoc
+                text = pypandoc.convert_file(
+                    tmp_path,
+                    'plain',
+                    format='html',
+                    extra_args=['--wrap=none', '--strip-comments']
+                )
+                
+                # Clean up the text
+                text = re.sub(r'\s+', ' ', text).strip()
+                return text
+            
+            finally:
+                # Clean up temporary file
+                os.unlink(tmp_path)
+                
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error converting HTML with Pandoc: {str(e)}")
+            return ""
+
+    @staticmethod
     def scrape_url(url: str, selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
         """Scrape content from URL with improved error handling and content type detection."""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] → Starting to scrape URL: {url}")
@@ -225,50 +281,39 @@ class URLScraper:
                 if URLScraper.is_twitter_url(url):
                     result = URLScraper.process_twitter_content(page, url)
                 else:
-                    # Process regular webpage
-                    result = {}
+                    # Process regular webpage using Pandoc
                     try:
                         if selectors:
+                            result = {}
                             for name, selector in selectors.items():
                                 elements = page.query_selector_all(selector)
                                 texts = []
                                 for el in elements:
-                                    text = el.text_content()
-                                    if text and text.strip():
-                                        texts.append(text.strip())
+                                    # Get HTML content of the element
+                                    html = el.evaluate('el => el.outerHTML')
+                                    if html:
+                                        text = URLScraper.extract_content_with_pandoc(html)
+                                        if text and text.strip():
+                                            texts.append(text.strip())
                                 result[name] = texts
                         else:
-                            # Get main content
-                            main_content = page.evaluate("""() => {
-                                const selectors = [
-                                    'main article',
-                                    'main',
-                                    'article',
-                                    '[role="main"]',
-                                    '.content',
-                                    '.main',
-                                    '#content',
-                                    '#main',
-                                    'body'
-                                ];
-                                
-                                for (const selector of selectors) {
-                                    const element = document.querySelector(selector);
-                                    if (element) {
-                                        return element.textContent
-                                            .replace(/\\s+/g, ' ')
-                                            .trim();
-                                    }
-                                }
-                                return '';
-                            }""")
+                            # Get full page HTML
+                            html = page.content()
+                            text_content = URLScraper.extract_content_with_pandoc(html)
                             
-                            if main_content:
+                            if text_content:
                                 result = {
                                     'type': 'webpage',
                                     'url': url,
-                                    'content': main_content
+                                    'content': text_content
                                 }
+                                
+                                # If content is longer than 10000 characters, generate summary
+                                if len(text_content) > 3000:
+                                    summary = URLScraper.get_webpage_summary(text_content)
+                                    result['summary'] = summary
+                            else:
+                                result = None
                     
                     except Exception as e:
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error extracting content: {str(e)}")
