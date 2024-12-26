@@ -3,11 +3,14 @@ import re
 import os
 import base64
 import tempfile
+import requests
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from litellm import completion
+import PyPDF2
+from io import BytesIO
 
 class URLScraper:
     @staticmethod
@@ -57,6 +60,91 @@ class URLScraper:
             return base64.b64encode(image_file.read()).decode("utf-8")
 
     @staticmethod
+    def download_pdf(url: str) -> Optional[bytes]:
+        """Download PDF file from URL."""
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error downloading PDF: {str(e)}")
+            return None
+
+    @staticmethod
+    def extract_pdf_text(pdf_content: bytes) -> str:
+        """Extract text content from PDF."""
+        try:
+            pdf_file = BytesIO(pdf_content)
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            text_content = []
+            
+            for page in pdf_reader.pages:
+                text_content.append(page.extract_text())
+            
+            return "\n".join(text_content)
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error extracting PDF text: {str(e)}")
+            return ""
+
+    @staticmethod
+    def get_pdf_summary(text: str) -> str:
+        """Get summary of PDF content using LLM."""
+        try:
+            # Truncate text if too long (adjust limit based on model's context window)
+            max_chars = 14000  # Adjust based on model's limits
+            if len(text) > max_chars:
+                text = text[:max_chars] + "..."
+
+            prompt = f"""Please provide a 100 word summary of the content. 
+            
+            Content:
+            {text}"""
+            
+            messages = [{ "content": prompt, "role": "user"}]
+            
+            response = completion(model="gpt-4o-mini", messages=messages)
+            
+            return response.choices[0].message.content if response.choices else "Summary generation failed."
+            
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error generating summary: {str(e)}")
+            return "Error generating summary"
+
+    @staticmethod
+    def process_pdf_content(url: str) -> Dict[str, Any]:
+        """Process PDF content by extracting text and generating summary."""
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Processing PDF from URL: {url}")
+        
+        # Download PDF
+        pdf_content = URLScraper.download_pdf(url)
+        if not pdf_content:
+            return {
+                'type': 'pdf',
+                'url': url,
+                'error': 'Failed to download PDF'
+            }
+
+        # Extract text
+        text_content = URLScraper.extract_pdf_text(pdf_content)
+        if not text_content:
+            return {
+                'type': 'pdf',
+                'url': url,
+                'error': 'Failed to extract text from PDF'
+            }
+        # print('----')
+        # print(text_content)
+        # print('----')
+        # Generate summary
+        summary = URLScraper.get_pdf_summary(text_content)
+        print(summary)
+        return {
+            'type': 'pdf',
+            'url': url,
+            'summary': summary
+        }
+
+    @staticmethod
     def process_twitter_content(page, url: str) -> Dict[str, Any]:
         """Process Twitter/X content by taking screenshot and using vision model."""
         try:
@@ -104,15 +192,6 @@ class URLScraper:
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Error processing Twitter content: {str(e)}")
             return None
-
-    @staticmethod
-    def process_pdf_content(url: str) -> Dict[str, Any]:
-        """Process PDF content (placeholder for future implementation)."""
-        return {
-            'type': 'pdf',
-            'url': url,
-            'content': 'PDF processing not yet implemented'
-        }
 
     @staticmethod
     def scrape_url(url: str, selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
