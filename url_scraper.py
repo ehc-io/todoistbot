@@ -176,43 +176,38 @@ class URLScraper:
 
     @staticmethod
     def process_github_content(page, url: str, model: str = "gpt-4o-mini") -> Dict[str, Any]:
-        """Process GitHub repository content and generate summary."""
+        """Process GitHub repository content (exact path) and generate summary."""
         try:
-            # Get root repository URL
-            root_url = URLScraper.get_repo_root_url(url)
+            # Navigate directly to the GitHub URL (no root repo fallback)
+            page.goto(url, wait_until='domcontentloaded', timeout=30000)
             
-            # Navigate to root repository first to get overview
-            page.goto(root_url, wait_until='domcontentloaded', timeout=30000)
-            
-            # Wait for repository content to load
+            # Wait for repository content to load (10-second timeout)
             page.wait_for_selector('div#repo-content-pjax-container', timeout=10000)
             
-            # Extract repository information
+            # Extract "About" text if available
             about_section = page.query_selector('.Layout-sidebar .f4')
             about_text = about_section.text_content().strip() if about_section else ""
             
-            # Get README content if available
+            # Extract README or page content if available
             readme = page.query_selector('article.markdown-body')
             readme_text = readme.text_content().strip() if readme else ""
             
-            # Get repository stats
+            # Attempt to gather basic repository stats if visible
             stars_el = page.query_selector('#repo-stars-counter-star')
             forks_el = page.query_selector('#repo-network-counter')
             watchers_el = page.query_selector('#repo-watchers-counter')
-            
             stats = {
                 'stars': stars_el.text_content().strip() if stars_el else "N/A",
                 'forks': forks_el.text_content().strip() if forks_el else "N/A",
                 'watchers': watchers_el.text_content().strip() if watchers_el else "N/A",
             }
             
-            # If URL points to specific path, navigate there and get additional content
-            if url != root_url:
-                page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                specific_content = page.query_selector('article.markdown-body, .Box-body')
-                if specific_content:
-                    specific_text = specific_content.text_content().strip()
-                    readme_text = f"Specific path content:\n{specific_text}\n\nRepository overview:\n{readme_text}"
+            # Look for any additional content on this specific path
+            specific_content = page.query_selector('article.markdown-body, .Box-body')
+            if specific_content:
+                specific_text = specific_content.text_content().strip()
+                # Combine "specific" content with the existing readme text
+                readme_text = f"Specific path content:\n{specific_text}\n\nRepository overview:\n{readme_text}"
             
             # Combine content for summarization
             content_for_summary = f"""
@@ -236,13 +231,11 @@ class URLScraper:
             
             messages = [{"content": prompt, "role": "user"}]
             response = completion(model=model, messages=messages)
-            
             summary = response.choices[0].message.content if response.choices else "Summary generation failed."
             
             return {
                 'type': 'github',
                 'url': url,
-                'repository_url': root_url,
                 'content': content_for_summary,
                 'summary': summary,
                 'stats': stats
@@ -410,4 +403,3 @@ class URLScraper:
             print(f"├── Error type: {type(e).__name__}")
             print(f"└── Details: {str(e)}")
             return None
-
