@@ -57,8 +57,9 @@ class URLScraper:
 
     @staticmethod
     def is_pdf_url(url: str) -> bool:
-        """Check if URL points to a PDF file."""
-        return url.lower().endswith('.pdf')
+        # Remove URL fragment if present (everything after #)
+        base_url = url.split('#')[0]
+        return base_url.lower().endswith('.pdf')
 
     @staticmethod
     def encode_image(image_path: str) -> str:
@@ -68,7 +69,8 @@ class URLScraper:
 
     @staticmethod
     def download_pdf(url: str) -> Optional[bytes]:
-        """Download PDF file from URL."""
+        # """Download PDF file from URL."""
+        # print(f"my_url: {url}")
         try:
             response = requests.get(url, timeout=30)
             response.raise_for_status()
@@ -111,7 +113,6 @@ class URLScraper:
             messages = [{ "content": prompt, "role": "user"}]
             
             response = completion(model=model, messages=messages)
-            
             return response.choices[0].message.content if response.choices else "Summary generation failed."
             
         except Exception as e:
@@ -123,7 +124,7 @@ class URLScraper:
         """Get summary of PDF content using LLM."""
         try:
             # Truncate text if too long (adjust limit based on model's context window)
-            max_chars = 14000  # Adjust based on model's limits
+            max_chars = 14000
             if len(text) > max_chars:
                 text = text[:max_chars] + "..."
 
@@ -135,7 +136,6 @@ class URLScraper:
             messages = [{ "content": prompt, "role": "user"}]
             
             response = completion(model=model, messages=messages)
-            
             return response.choices[0].message.content if response.choices else "Summary generation failed."
             
         except Exception as e:
@@ -333,8 +333,12 @@ class URLScraper:
         if not URLScraper.is_valid_url(url):
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid URL: {url}")
             return None
-            
+
+        # If it's a PDF, remove any fragment before processing
         if URLScraper.is_pdf_url(url):
+            # Strip off anything after '#'
+            url = re.sub(r'#.*$', '', url)
+            # print(f"my_url_1: {url}")
             return URLScraper.process_pdf_content(url, model=model)
             
         try:
@@ -383,7 +387,7 @@ class URLScraper:
                                     'content': text_content
                                 }
                                 
-                                # If content is longer than 2000 characters, generate summary using specified model
+                                # If content is longer than 2000 characters, generate summary
                                 if len(text_content) > 2000:
                                     summary = URLScraper.get_webpage_summary(text_content, model=model)
                                     result['summary'] = summary
