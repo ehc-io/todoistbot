@@ -167,11 +167,11 @@ class URLScraper:
 
         # Generate summary using specified model
         summary = URLScraper.get_pdf_summary(text_content, model=model)
-        print(summary)
+        # print(summary)
         return {
             'type': 'pdf',
             'url': url,
-            'summary': summary
+            'content': summary
         }
 
     @staticmethod
@@ -236,8 +236,7 @@ class URLScraper:
             return {
                 'type': 'github',
                 'url': url,
-                'content': content_for_summary,
-                'summary': summary,
+                'content': summary,
                 'stats': stats
             }
                 
@@ -379,18 +378,14 @@ class URLScraper:
                         else:
                             html = page.content()
                             text_content = URLScraper.extract_content_with_pandoc(html)
+                            summary = URLScraper.get_webpage_summary(text_content, model=model)
                             
                             if text_content:
                                 result = {
                                     'type': 'webpage',
                                     'url': url,
-                                    'content': text_content
+                                    'content': summary
                                 }
-                                
-                                # If content is longer than 2000 characters, generate summary
-                                if len(text_content) > 2000:
-                                    summary = URLScraper.get_webpage_summary(text_content, model=model)
-                                    result['summary'] = summary
                             else:
                                 result = None
                     

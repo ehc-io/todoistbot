@@ -75,7 +75,7 @@ def process_task(api: TodoistAPI, task, mark_closed: bool) -> dict:
         if scraped_content:
             task_data['urls_content'].append({
                 'url': url,
-                'content': scraped_content
+                'content': scraped_content['content']
             })
 
     if urls and mark_closed and task_data['urls_content']:
@@ -106,7 +106,7 @@ def write_markdown(tasks_data: List[dict], output_file: str):
                 f.write("### URL Contents\n\n")
                 for url_data in task_data['urls_content']:
                     f.write(f"#### {url_data['url']}\n\n")
-                    content = url_data['content'].get('content', '')
+                    content = url_data['content']
                     if content:
                         content_preview = content[:2000] + ('...' if len(content) > 2000 else '')
                         f.write(f"```\n{content_preview}\n```\n\n")
@@ -122,26 +122,26 @@ def main():
     args = parser.parse_args()
 
     api = TodoistAPI(get_api_key())
-    try:
-        tasks = api.get_tasks()
-        if args.project_id:
-            tasks = [t for t in tasks if t.project_id == args.project_id]
-        if args.max_tasks:
-            tasks = tasks[:args.max_tasks]
+    # try:
+    tasks = api.get_tasks()
+    if args.project_id:
+        tasks = [t for t in tasks if t.project_id == args.project_id]
+    if args.max_tasks:
+        tasks = tasks[:args.max_tasks]
 
-        tasks_data = []
-        for task in tasks:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] → Processing task: {task.content}")
-            task_data = process_task(api, task, not args.no_close)
-            tasks_data.append(task_data)
+    tasks_data = []
+    for task in tasks:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] → Processing task: {task.content}")
+        task_data = process_task(api, task, not args.no_close)
+        tasks_data.append(task_data)
 
-        output_file = args.output if args.output else f"{int(time.time())}.md"
-        write_markdown(tasks_data, output_file)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Report written to: {output_file}")
+    output_file = args.output if args.output else f"{int(time.time())}.md"
+    write_markdown(tasks_data, output_file)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Report written to: {output_file}")
 
-    except Exception as error:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Fatal error: {str(error)}")
-        exit(1)
+    # except Exception as error:
+    #     print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Fatal error: {str(error)}")
+    #     exit(1)
 
 if __name__ == "__main__":
     main()
