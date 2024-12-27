@@ -12,17 +12,69 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from litellm import completion
 import PyPDF2
 from io import BytesIO
+from bs4 import BeautifulSoup
+
+class TwitterProcessor:
+    """Helper class for processing Twitter content."""
+    
+    @staticmethod
+    def extract_urls_from_html(html_content: str) -> List[str]:
+        """Extract all external URLs from tweet HTML."""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        urls = []
+        
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag['href']
+            if not href.startswith('/') and not href.startswith('https://twitter.com'):
+                urls.append(href)
+        
+        return list(set(urls))
+
+    @staticmethod
+    def extract_tweet_text(html_content: str) -> str:
+        """Extract clean text content from tweet HTML."""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        tweet_text_div = soup.find('div', {'data-testid': 'tweetText'})
+        
+        if not tweet_text_div:
+            return ""
+            
+        text_parts = []
+        for element in tweet_text_div.descendants:
+            if element.name == 'a':
+                if element.get('href', '').startswith('/'):
+                    text_parts.append(element.text)
+            elif isinstance(element, str):
+                text_parts.append(element.strip())
+                
+        return ' '.join(filter(None, text_parts))
+
+    @staticmethod
+    def extract_metadata(html_content: str) -> Dict[str, Any]:
+        """Extract additional metadata from tweet HTML."""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        metadata = {}
+        
+        timestamp_elem = soup.find('time')
+        if timestamp_elem and timestamp_elem.get('datetime'):
+            metadata['timestamp'] = timestamp_elem['datetime']
+        
+        author_elem = soup.find('div', {'data-testid': 'User-Name'})
+        if author_elem:
+            metadata['author'] = {
+                'name': author_elem.text,
+                'handle': author_elem.find('span', text=re.compile(r'^@')).text if author_elem.find('span', text=re.compile(r'^@')) else None
+            }
+        
+        return metadata
 
 class URLScraper:
     @staticmethod
     def clean_url(url: str) -> str:
         """Clean and normalize URL."""
-        # Remove trailing parentheses and other common artifacts
         url = re.sub(r'[)\]]$', '', url)
-        # Remove hash fragments unless they're meaningful
         if '#' in url and not any(x in url for x in ['#page=', '#section=']):
             url = url.split('#')[0]
-        # Normalize Twitter/X URLs
         url = url.replace('x.com', 'twitter.com')
         return url.strip()
 
@@ -31,9 +83,7 @@ class URLScraper:
         """Validate URL and check if it's scrapeable."""
         try:
             result = urlparse(url)
-            if not all([result.scheme, result.netloc]):
-                return False
-            return True
+            return all([result.scheme, result.netloc])
         except:
             return False
 
@@ -57,7 +107,6 @@ class URLScraper:
 
     @staticmethod
     def is_pdf_url(url: str) -> bool:
-        # Remove URL fragment if present (everything after #)
         base_url = url.split('#')[0]
         return base_url.lower().endswith('.pdf')
 
@@ -69,8 +118,6 @@ class URLScraper:
 
     @staticmethod
     def download_pdf(url: str) -> Optional[bytes]:
-        # """Download PDF file from URL."""
-        # print(f"my_url: {url}")
         try:
             response = requests.get(url, timeout=30)
             response.raise_for_status()
@@ -246,24 +293,28 @@ class URLScraper:
 
     @staticmethod
     def process_twitter_content(page, url: str, model: str = "gpt-4o-mini") -> Dict[str, Any]:
-        """Process Twitter/X content by taking screenshot and using vision model."""
+        """Process Twitter/X content using both screenshot analysis and HTML parsing."""
         try:
             # Wait for tweet to load
-            page.wait_for_selector('article[data-testid="tweet"]', timeout=10000)
+            tweet_selector = 'article[data-testid="tweet"]'
+            page.wait_for_selector(tweet_selector, timeout=10000)
             
-            # Create temporary file for screenshot
+            # Get the HTML content first
+            tweet_element = page.query_selector(tweet_selector)
+            html_content = tweet_element.inner_html()
+            
+            # Extract text, URLs, and metadata from HTML
+            tweet_text = TwitterProcessor.extract_tweet_text(html_content)
+            urls = TwitterProcessor.extract_urls_from_html(html_content)
+            metadata = TwitterProcessor.extract_metadata(html_content)
+            
+            # Take screenshot for vision model analysis
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                # Take screenshot of the tweet
-                tweet_element = page.query_selector('article[data-testid="tweet"]')
                 tweet_element.screenshot(path=tmp.name)
-                
-                # Encode image to base64
                 base64_image = URLScraper.encode_image(tmp.name)
-                
-                # Remove temporary file
                 os.unlink(tmp.name)
                 
-                # Use vision model to describe tweet
+                # Use vision model for comprehensive analysis
                 response = completion(
                     model=model,
                     messages=[
@@ -272,7 +323,7 @@ class URLScraper:
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": "Please describe this tweet in detail, including the author, content, images if any, and engagement metrics if visible."
+                                    "text": "Please analyze this tweet and provide: 1) Main topic/subject, 2) Any media content description, 3) Notable engagement metrics if visible, 4) Any hashtags or key mentions"
                                 },
                                 {
                                     "type": "image_url",
@@ -283,15 +334,46 @@ class URLScraper:
                     ]
                 )
                 
+                vision_analysis = response.choices[0].message.content if response.choices else None
+                
+                # Combine all information into a comprehensive summary
+                content_parts = []
+                
+                # Add metadata if available
+                if metadata.get('author'):
+                    author_info = metadata['author']
+                    content_parts.append(f"Author: {author_info.get('name')} ({author_info.get('handle')})")
+                
+                if metadata.get('timestamp'):
+                    content_parts.append(f"Posted: {metadata['timestamp']}")
+                
+                # Add the original tweet text
+                if tweet_text:
+                    content_parts.append(f"\nTweet text:\n{tweet_text}")
+                
+                # Add vision model analysis
+                if vision_analysis:
+                    content_parts.append(f"\nAnalysis:\n{vision_analysis}")
+                
+                # Add external links
+                if urls:
+                    content_parts.append("\nExternal links:")
+                    for url in urls:
+                        content_parts.append(f"- {url}")
+                
+                # Combine all parts into a single content string
+                combined_content = "\n".join(content_parts)
+                
                 return {
                     'type': 'twitter',
                     'url': url,
-                    'content': response.choices[0].message.content if response.choices else None
+                    'content': combined_content
                 }
                     
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Error processing Twitter content: {str(e)}")
             return None
+
 
     @staticmethod
     def extract_content_with_pandoc(html: str) -> str:
