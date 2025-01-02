@@ -3,7 +3,7 @@ import os
 import re
 import argparse
 import time
-from typing import List, Dict
+from typing import List, Dict, Set
 from todoist_api_python.api import TodoistAPI
 from datetime import datetime
 from url_scraper import URLScraper
@@ -46,6 +46,45 @@ class URLExtractor:
             cleaned_urls.append(url)
         
         return list(set(cleaned_urls))  # Remove duplicates
+
+def get_bypassed_project_ids(api: TodoistAPI, bypass_projects: str = None) -> Set[str]:
+    """
+    Get the project IDs that should be bypassed during processing.
+    By default, returns the Inbox project ID.
+    If bypass_projects is provided, returns the IDs of specified projects.
+    
+    Args:
+        api: TodoistAPI instance
+        bypass_projects: Comma-separated string of project names to bypass
+    
+    Returns:
+        Set of project IDs to bypass
+    """
+    try:
+        projects = api.get_projects()
+        
+        # If no specific projects are provided, bypass Inbox by default
+        if not bypass_projects:
+            return {p.id for p in projects if p.is_inbox_project}
+            
+        # Convert project names to lowercase for case-insensitive matching
+        bypass_names = {name.strip().lower() for name in bypass_projects.split(',')}
+        bypass_ids = set()
+        
+        for project in projects:
+            if project.name.lower() in bypass_names:
+                bypass_ids.add(project.id)
+                bypass_names.remove(project.name.lower())
+        
+        # Warn about any project names that weren't found
+        if bypass_names:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Warning: Projects not found: {', '.join(bypass_names)}")
+            
+        return bypass_ids
+        
+    except Exception as error:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Error getting projects: {str(error)}")
+        return set()
 
 def get_api_key() -> str:
     api_key = os.getenv('TODOIST_API_KEY')
@@ -112,22 +151,37 @@ def write_markdown(tasks_data: List[dict], output_file: str):
                         f.write(f"```\n{content_preview}\n```\n\n")
             
             f.write("---\n\n")
-            
+      
+       
 def main():
     parser = argparse.ArgumentParser(description='Process Todoist tasks and extract URL contents')
     parser.add_argument('--project-id', help='Specific project ID to process')
     parser.add_argument('--no-close', action='store_true', help='Do not mark tasks as closed after processing')
     parser.add_argument('--output', help='Output file path')
     parser.add_argument('--max-tasks', type=int, help='Maximum number of tasks to process')
+    parser.add_argument('--bypass-projects', help='Comma-separated list of project names to bypass. If not specified, bypasses Inbox project by default')
     args = parser.parse_args()
 
     api = TodoistAPI(get_api_key())
     try:
+        # Get projects to bypass
+        bypass_project_ids = get_bypassed_project_ids(api, args.bypass_projects)
+        
+        # Get and filter tasks
         tasks = api.get_tasks()
+        
+        # Filter out tasks from bypassed projects
+        tasks = [t for t in tasks if t.project_id not in bypass_project_ids]
+        
+        # Apply additional filters
         if args.project_id:
             tasks = [t for t in tasks if t.project_id == args.project_id]
         if args.max_tasks:
             tasks = tasks[:args.max_tasks]
+
+        if not tasks:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ No tasks to process after filtering")
+            return
 
         tasks_data = []
         for task in tasks:
@@ -135,7 +189,7 @@ def main():
             task_data = process_task(api, task, not args.no_close)
             tasks_data.append(task_data)
 
-        output_file = args.output if args.output else f"{int(time.time())}.md"
+        output_file = args.output if args.output else f"{int(time.time())}-captured-notes.md"
         write_markdown(tasks_data, output_file)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Report written to: {output_file}")
 
