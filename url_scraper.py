@@ -6,13 +6,14 @@ import tempfile
 import requests
 import pypandoc
 from typing import Optional, List, Dict, Any
-from urllib.parse import urlparse
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from litellm import completion
 import PyPDF2
 from io import BytesIO
 from bs4 import BeautifulSoup
+from googleapiclient.discovery import build
+from urllib.parse import urlparse, parse_qs
 
 class TwitterProcessor:
     """Helper class for processing Twitter content."""
@@ -68,6 +69,128 @@ class TwitterProcessor:
         
         return metadata
 
+class YouTubeProcessor:
+    """Helper class for processing YouTube content using the YouTube Data API."""
+    
+    def __init__(self, api_key: str):
+        """Initialize YouTube API client.
+        
+        Args:
+            api_key (str): YouTube Data API key
+        """
+        self.youtube = build('youtube', 'v3', developerKey=api_key)
+    
+    @staticmethod
+    def extract_video_id(url: str) -> Optional[str]:
+        """Extract video ID from various YouTube URL formats."""
+        # Handle youtu.be URLs
+        if 'youtu.be' in url:
+            return url.split('/')[-1].split('?')[0]
+        
+        # Handle youtube.com URLs
+        parsed_url = urlparse(url)
+        if 'youtube.com' in parsed_url.netloc:
+            query_params = parse_qs(parsed_url.query)
+            if 'v' in query_params:
+                return query_params['v'][0]
+        
+        return None
+    
+    @staticmethod
+    def extract_playlist_id(url: str) -> Optional[str]:
+        """Extract playlist ID from YouTube URL."""
+        parsed_url = urlparse(url)
+        if 'youtube.com' in parsed_url.netloc:
+            query_params = parse_qs(parsed_url.query)
+            if 'list' in query_params:
+                return query_params['list'][0]
+        return None
+    
+    def get_video_details(self, video_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch video details using YouTube API."""
+        try:
+            request = self.youtube.videos().list(
+                part="snippet,statistics",
+                id=video_id
+            )
+            response = request.execute()
+            
+            if not response['items']:
+                return None
+            
+            video = response['items'][0]
+            snippet = video['snippet']
+            statistics = video['statistics']
+            
+            return {
+                'type': 'youtube_video',
+                'video_id': video_id,
+                'url': f'https://youtube.com/watch?v={video_id}',
+                'content': {
+                    'title': snippet['title'],
+                    'description': snippet['description'],
+                    'published_at': snippet['publishedAt'],
+                    'channel_title': snippet['channelTitle'],
+                    'view_count': statistics.get('viewCount', 'N/A'),
+                    'like_count': statistics.get('likeCount', 'N/A')
+                }
+            }
+            
+        except Exception as e:
+            print(f"Error fetching video details: {str(e)}")
+            return None
+    
+    def get_playlist_details(self, playlist_id: str, max_items: int = 50) -> Optional[Dict[str, Any]]:
+        """Fetch playlist details and items using YouTube API."""
+        try:
+            # First get playlist details
+            playlist_request = self.youtube.playlists().list(
+                part="snippet",
+                id=playlist_id
+            )
+            playlist_response = playlist_request.execute()
+            
+            if not playlist_response['items']:
+                return None
+            
+            playlist = playlist_response['items'][0]
+            snippet = playlist['snippet']
+            
+            # Then get playlist items
+            items_request = self.youtube.playlistItems().list(
+                part="snippet",
+                playlistId=playlist_id,
+                maxResults=max_items
+            )
+            items_response = items_request.execute()
+            
+            videos = []
+            for item in items_response.get('items', []):
+                video_snippet = item['snippet']
+                videos.append({
+                    'title': video_snippet['title'],
+                    'video_id': video_snippet['resourceId']['videoId'],
+                    'position': video_snippet['position'] + 1
+                })
+            
+            return {
+                'type': 'youtube_playlist',
+                'playlist_id': playlist_id,
+                'url': f'https://youtube.com/playlist?list={playlist_id}',
+                'content': {
+                    'title': snippet['title'],
+                    'description': snippet['description'],
+                    'channel_title': snippet['channelTitle'],
+                    'published_at': snippet['publishedAt'],
+                    'video_count': len(videos),
+                    'videos': videos
+                }
+            }
+            
+        except Exception as e:
+            print(f"Error fetching playlist details: {str(e)}")
+            return None 
+    
 class URLScraper:
     @staticmethod
     def clean_url(url: str) -> str:
@@ -109,6 +232,16 @@ class URLScraper:
     def is_pdf_url(url: str) -> bool:
         base_url = url.split('#')[0]
         return base_url.lower().endswith('.pdf')
+
+    @staticmethod
+    def is_youtube_url(url: str) -> bool:
+        """Check if URL is a YouTube video or playlist."""
+        youtube_patterns = [
+            r'https?://(?:www\.)?youtube\.com/watch\?v=[\w-]+',
+            r'https?://(?:www\.)?youtube\.com/playlist\?list=[\w-]+',
+            r'https?://youtu\.be/[\w-]+'
+        ]
+        return any(re.match(pattern, url) for pattern in youtube_patterns)
 
     @staticmethod
     def encode_image(image_path: str) -> str:
@@ -374,7 +507,33 @@ class URLScraper:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Error processing Twitter content: {str(e)}")
             return None
 
-
+    @staticmethod
+    def process_youtube_content(url: str, youtube_processor: YouTubeProcessor) -> Optional[Dict[str, Any]]:
+        """Process YouTube video or playlist content."""
+        # Check for video ID first
+        video_id = youtube_processor.extract_video_id(url)
+        if video_id:
+            video_details = youtube_processor.get_video_details(video_id)
+            if video_details:
+                return {
+                    'type': 'youtube',
+                    'url': url,
+                    'content': f"{video_details['content']['title']} | {video_details['content']['description']}"
+                }
+        
+        # Check for playlist ID
+        playlist_id = youtube_processor.extract_playlist_id(url)
+        if playlist_id:
+            playlist_details = youtube_processor.get_playlist_details(playlist_id)
+            if playlist_details:
+                return {
+                    'type': 'youtube',
+                    'url': url,
+                    'content': f"{playlist_details['content']['title']} | {playlist_details['content']['description']}"
+                }
+        
+        return None
+    
     @staticmethod
     def extract_content_with_pandoc(html: str) -> str:
         """Extract text content from HTML using Pandoc."""
@@ -407,13 +566,22 @@ class URLScraper:
 
     @staticmethod
     def scrape_url(url: str, model: str = "gpt-4o-mini", selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
-        """Scrape content from URL with improved error handling and content type detection."""
+        """Extended scrape_url method with YouTube support."""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] → Starting to scrape URL: {url}")
         
-        # First check URL type
         if not URLScraper.is_valid_url(url):
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid URL: {url}")
             return None
+            
+        # Check if it's a YouTube URL
+        if URLScraper.is_youtube_url(url):
+            youtube_api_key = os.getenv('YOUTUBE_API_KEY')
+            if not youtube_api_key:
+                print("YOUTUBE_API_KEY environment variable is not set")
+                return None
+                
+            youtube_processor = YouTubeProcessor(youtube_api_key)
+            return URLScraper.process_youtube_content(url, youtube_processor)
 
         # If it's a PDF, remove any fragment before processing
         if URLScraper.is_pdf_url(url):
