@@ -98,7 +98,10 @@ def get_api_key() -> str:
     return api_key
 
 def process_task(api: TodoistAPI, task, mark_closed: bool) -> dict:
-    """Process a single task and its URLs."""
+    """
+    Process a single task and its URLs.
+    Returns None if no valid content was scraped from any URL.
+    """
     task_data = {
         'content': task.content,
         'description': task.description,
@@ -111,23 +114,32 @@ def process_task(api: TodoistAPI, task, mark_closed: bool) -> dict:
         urls.extend(URLExtractor.extract_markdown_urls(task.description))
 
     urls = list(dict.fromkeys(url for url in urls if URLScraper.is_valid_url(url)))
-
+    
+    successful_scrapes = False
     for url in urls:
-        scraped_content = URLScraper.scrape_url(url)
-        if scraped_content:
-            task_data['urls_content'].append({
-                'url': url,
-                'content': scraped_content['content']
-            })
+        try:
+            scraped_content = URLScraper.scrape_url(url)
+            if scraped_content and scraped_content.get('content'):
+                task_data['urls_content'].append({
+                    'url': url,
+                    'content': scraped_content['content']
+                })
+                successful_scrapes = True
+            else:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ No content retrieved from URL: {url}")
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Error scraping URL {url}: {str(e)}")
 
-    if urls and mark_closed and task_data['urls_content']:
+    # Only close the task if we successfully scraped content and marking as closed is requested
+    if successful_scrapes and mark_closed:
         try:
             api.close_task(task_id=task.id)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Task {task.id} marked as completed")
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Failed to close task {task.id}: {str(e)}")
 
-    return task_data
+    # Return None if no content was successfully scraped
+    return task_data if successful_scrapes else None
 
 def upload_to_drive(content: str, filename: str) -> str:
     """Upload content to Google Drive using service account."""
@@ -172,7 +184,10 @@ def generate_markdown(tasks_data: List[dict]) -> str:
     content = "# Todoist Tasks Report\n\n"
     content += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     
-    for task_data in tasks_data:
+    # Filter out None values (tasks with no content)
+    valid_tasks = [task for task in tasks_data if task is not None]
+    
+    for task_data in valid_tasks:
         content += f"## {task_data['content']}\n\n"
         
         if task_data['description']:
@@ -217,7 +232,12 @@ def main():
         for task in tasks:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] → Processing task: {task.content}")
             task_data = process_task(api, task, not args.no_close)
-            tasks_data.append(task_data)
+            if task_data:  # Only append if we got valid content
+                tasks_data.append(task_data)
+
+        if not tasks_data:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ No tasks contained valid content after processing")
+            return
 
         # Generate markdown content
         markdown_content = generate_markdown(tasks_data)
@@ -234,6 +254,6 @@ def main():
     except Exception as error:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Fatal error: {str(error)}")
         exit(1)
-
+        
 if __name__ == "__main__":
     main()

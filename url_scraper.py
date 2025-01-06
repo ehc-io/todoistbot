@@ -565,7 +565,7 @@ class URLScraper:
             return ""
 
     @staticmethod
-    def scrape_url(url: str, model: str = "gpt-4o-mini", selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
+    def _scrape_url(url: str, model: str = "gpt-4o-mini", selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
         """Extended scrape_url method with YouTube support."""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] → Starting to scrape URL: {url}")
         
@@ -642,6 +642,209 @@ class URLScraper:
                     except Exception as e:
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error extracting content: {str(e)}")
                         return None
+                
+                browser.close()
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Successfully scraped URL: {url}")
+                return result
+                
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error scraping {url}:")
+            print(f"├── Error type: {type(e).__name__}")
+            print(f"└── Details: {str(e)}")
+            return None
+
+    @staticmethod
+    def get_url_info_from_search(url: str) -> Optional[str]:
+        """Get information about a URL using Google Custom Search API."""
+        try:
+            # Get API credentials from environment
+            api_key = os.getenv('GOOGLE_SEARCH_API_KEY')
+            cx = os.getenv('SEARCH_ENGINE_ID')  # Custom Search Engine ID
+            
+            if not api_key or not cx:
+                print("[{datetime.now().strftime('%H:%M:%S')}] Google API credentials not configured")
+                return None
+            
+            # Initialize the Custom Search API service
+            service = build("customsearch", "v1", developerKey=api_key)
+            
+            # Extract domain for better search results
+            domain = urlparse(url).netloc
+            
+            # Perform the search
+            query = f"site:{domain} {url}"  # Search for content from this specific URL and domain
+            result = service.cse().list(q=query, cx=cx, num=5).execute()
+            
+            if 'items' not in result:
+                return None
+                
+            # Collect relevant information from search results
+            search_info = []
+            
+            # Try to get description of the exact URL
+            exact_match = next((item for item in result['items'] 
+                              if item['link'].startswith(url)), None)
+            
+            if exact_match and 'snippet' in exact_match:
+                search_info.append(f"Page description: {exact_match['snippet']}")
+            
+            # Get site description if available
+            site_info = next((item for item in result['items'] 
+                            if item['link'].startswith(f"https://{domain}")), None)
+                            
+            if site_info and 'snippet' in site_info:
+                search_info.append(f"Site information: {site_info['snippet']}")
+            
+            # Combine the information
+            if search_info:
+                return " | ".join(search_info)
+            return None
+            
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting search results: {str(e)}")
+            return None
+
+
+    @staticmethod
+    def scrape_url(url: str, model: str = "gpt-4o-mini", selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
+        """Extended scrape_url method with screenshot fallback."""
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] → Starting to scrape URL: {url}")
+        
+        if not URLScraper.is_valid_url(url):
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid URL: {url}")
+            return None
+            
+        # Check for special URL types (YouTube, PDF, etc.)
+        if URLScraper.is_youtube_url(url):
+            youtube_api_key = os.getenv('YOUTUBE_API_KEY')
+            if not youtube_api_key:
+                print("YOUTUBE_API_KEY environment variable is not set")
+                return None
+            youtube_processor = YouTubeProcessor(youtube_api_key)
+            return URLScraper.process_youtube_content(url, youtube_processor)
+
+        if URLScraper.is_pdf_url(url):
+            url = re.sub(r'#.*$', '', url)
+            return URLScraper.process_pdf_content(url, model=model)
+            
+        try:
+            with sync_playwright() as p:
+                # Launch browser with specific arguments
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--disable-gpu',
+                        '--disable-dev-shm-usage',
+                        '--disable-setuid-sandbox',
+                        '--no-sandbox',
+                    ]
+                )
+                
+                # Configure context with resource handling
+                context = browser.new_context(
+                    viewport={'width': 1280, 'height': 800},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    # Reduce memory usage
+                    device_scale_factor=1,
+                    # Disable features that might slow down loading
+                    is_mobile=False,
+                    has_touch=False
+                )
+                page = context.new_page()
+                
+                # Set up request interception to block non-essential resources
+                page.route("**/*", lambda route: route.abort() 
+                    if route.request.resource_type in ['image', 'stylesheet', 'font', 'media'] 
+                    else route.continue_())
+                
+                # Configure page for optimal loading
+                page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+                
+                # Enable JavaScript error handling
+                page.on("pageerror", lambda err: print(f"Page error: {err}"))
+                page.on("console", lambda msg: print(f"Console {msg.type}: {msg.text}"))
+                
+                try:
+                    page.goto(url, wait_until='domcontentloaded', timeout=20000)
+                except PlaywrightTimeout:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Page failed to load: {url}")
+                    print("Attempting to get information from search...")
+                    
+                    # Try to get information about the URL from search
+                    search_info = URLScraper.get_url_info_from_search(url)
+                    if search_info:
+                        result = {
+                            'type': 'webpage',
+                            'url': url,
+                            'content': search_info,
+                            'extraction_method': 'web_search'
+                        }
+                        return result
+                    return None
+                except PlaywrightTimeout:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Timeout loading page: {url}")
+                    return None
+                
+                # Process based on URL type
+                if URLScraper.is_twitter_url(url):
+                    result = URLScraper.process_twitter_content(page, url, model=model)
+                elif URLScraper.is_github_repo_url(url):
+                    result = URLScraper.process_github_content(page, url, model=model)
+                else:
+                    # Try Pandoc extraction first
+                    try:
+                        if selectors:
+                            result = {}
+                            for name, selector in selectors.items():
+                                elements = page.query_selector_all(selector)
+                                texts = []
+                                for el in elements:
+                                    html = el.evaluate('el => el.outerHTML')
+                                    if html:
+                                        text = URLScraper.extract_content_with_pandoc(html)
+                                        if text and text.strip():
+                                            texts.append(text.strip())
+                                result[name] = texts
+                        else:
+                            html = page.content()
+                            text_content = URLScraper.extract_content_with_pandoc(html)
+                            
+                            if not text_content or len(text_content.strip()) < 100:  # Check if content extraction failed or returned minimal content
+                                print(f"[{datetime.now().strftime('%H:%M:%S')}] Pandoc extraction failed or returned minimal content. Falling back to web search.")
+                                
+                                # Fallback to web search
+                                search_info = URLScraper.get_url_info_from_search(url)
+                                if search_info:
+                                    result = {
+                                        'type': 'webpage',
+                                        'url': url,
+                                        'content': search_info,
+                                        'extraction_method': 'web_search'
+                                    }
+                                else:
+                                    result = None
+                            else:
+                                summary = URLScraper.get_webpage_summary(text_content, model=model)
+                                result = {
+                                    'type': 'webpage',
+                                    'url': url,
+                                    'content': summary,
+                                    'extraction_method': 'pandoc'
+                                }
+                    
+                    except Exception as e:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error with Pandoc extraction, falling back to screenshot: {str(e)}")
+                        # Fallback to web search
+                        search_info = URLScraper.get_url_info_from_search(url)
+                        if search_info:
+                            result = {
+                                'type': 'webpage',
+                                'url': url,
+                                'content': search_info,
+                                'extraction_method': 'web_search'
+                            }
+                        else:
+                            result = None
                 
                 browser.close()
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Successfully scraped URL: {url}")
