@@ -3,10 +3,15 @@ import os
 import re
 import argparse
 import time
+import json
 from typing import List, Dict, Set
 from todoist_api_python.api import TodoistAPI
 from datetime import datetime
 from url_scraper import URLScraper
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+import io
 
 class URLExtractor:
     """Helper class to extract and clean URLs from text content."""
@@ -101,12 +106,10 @@ def process_task(api: TodoistAPI, task, mark_closed: bool) -> dict:
         'urls_content': []
     }
 
-    # Use the new URLExtractor to handle both Markdown and plain URLs
     urls = URLExtractor.extract_markdown_urls(task.content)
     if task.description:
         urls.extend(URLExtractor.extract_markdown_urls(task.description))
 
-    # Remove duplicates while preserving order
     urls = list(dict.fromkeys(url for url in urls if URLScraper.is_valid_url(url)))
 
     for url in urls:
@@ -126,56 +129,83 @@ def process_task(api: TodoistAPI, task, mark_closed: bool) -> dict:
 
     return task_data
 
-def write_markdown(tasks_data: List[dict], output_file: str):
-    """Write tasks data to markdown file."""
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write("# Todoist Tasks Report\n\n")
-        f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+def upload_to_drive(content: str, filename: str) -> str:
+    """Upload content to Google Drive using service account."""
+    # Use broader scope for testing
+    SCOPES = ['https://www.googleapis.com/auth/drive']
+    folder_id = "1EYsoUYgwecrrBBFj7gw6Jr6ZY6vfGARi"  # Replace with your Google Drive folder ID
+    credentials_path = "/mnt/vault/drive-svc-ehc-io.json"
+    
+    credentials = service_account.Credentials.from_service_account_file(
+        credentials_path, scopes=SCOPES)
+    
+    service = build('drive', 'v3', credentials=credentials)
+
+    try:
+        file_metadata = {
+            'name': filename,
+            'parents': [folder_id]
+        }
         
-        for task_data in tasks_data:
-            f.write(f"## {task_data['content']}\n\n")
-            
-            if task_data['description']:
-                f.write(f"Description: {task_data['description']}\n\n")
-            
-            if task_data['labels']:
-                f.write("Labels: " + ", ".join(task_data['labels']) + "\n\n")
-            
-            if task_data['urls_content']:
-                # f.write("### URL Contents\n\n")
-                for url_data in task_data['urls_content']:
-                    # f.write(f"#### {url_data['url']}\n\n")
-                    content = url_data['content']
-                    if content:
-                        content_preview = content[:2000] + ('...' if len(content) > 2000 else '')
-                        f.write(f"```\n{content_preview}\n```\n\n")
-            
-            f.write("---\n\n")
-      
-       
+        content_bytes = io.BytesIO(content.encode('utf-8'))
+        media = MediaIoBaseUpload(
+            content_bytes,
+            mimetype='text/plain',
+            resumable=True
+        )
+        
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink',
+            supportsAllDrives=True  # Add support for shared drives
+        ).execute()
+        
+        return file.get('webViewLink')
+        
+    except Exception as e:
+        print(f"\nError uploading to Drive: {str(e)}")
+        raise
+
+def generate_markdown(tasks_data: List[dict]) -> str:
+    """Generate markdown content from tasks data."""
+    content = "# Todoist Tasks Report\n\n"
+    content += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    
+    for task_data in tasks_data:
+        content += f"## {task_data['content']}\n\n"
+        
+        if task_data['description']:
+            content += f"Description: {task_data['description']}\n\n"
+        
+        if task_data['labels']:
+            content += "Labels: " + ", ".join(task_data['labels']) + "\n\n"
+        
+        if task_data['urls_content']:
+            for url_data in task_data['urls_content']:
+                content_text = url_data['content']
+                if content_text:
+                    content_preview = content_text[:2000] + ('...' if len(content_text) > 2000 else '')
+                    content += f"```\n{content_preview}\n```\n\n"
+        
+        content += "---\n\n"
+    
+    return content
+
 def main():
     parser = argparse.ArgumentParser(description='Process Todoist tasks and extract URL contents')
-    parser.add_argument('--project-id', help='Specific project ID to process')
     parser.add_argument('--no-close', action='store_true', help='Do not mark tasks as closed after processing')
-    parser.add_argument('--output', help='Output file path')
     parser.add_argument('--max-tasks', type=int, help='Maximum number of tasks to process')
     parser.add_argument('--bypass-projects', help='Comma-separated list of project names to bypass. If not specified, bypasses Inbox project by default')
     args = parser.parse_args()
 
     api = TodoistAPI(get_api_key())
     try:
-        # Get projects to bypass
         bypass_project_ids = get_bypassed_project_ids(api, args.bypass_projects)
         
-        # Get and filter tasks
         tasks = api.get_tasks()
-        
-        # Filter out tasks from bypassed projects
         tasks = [t for t in tasks if t.project_id not in bypass_project_ids]
         
-        # Apply additional filters
-        if args.project_id:
-            tasks = [t for t in tasks if t.project_id == args.project_id]
         if args.max_tasks:
             tasks = tasks[:args.max_tasks]
 
@@ -189,9 +219,17 @@ def main():
             task_data = process_task(api, task, not args.no_close)
             tasks_data.append(task_data)
 
-        output_file = args.output if args.output else f"{int(time.time())}-captured-notes.md"
-        write_markdown(tasks_data, output_file)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Report written to: {output_file}")
+        # Generate markdown content
+        markdown_content = generate_markdown(tasks_data)
+    
+        # Upload to Google Drive
+        filename = f"{int(time.time())}-captured-notes.md"
+        try:
+            drive_link = upload_to_drive(markdown_content, filename)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Report uploaded to Google Drive: {drive_link}")
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Failed to upload to Google Drive: {str(e)}")
+            exit(1)
 
     except Exception as error:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Fatal error: {str(error)}")
