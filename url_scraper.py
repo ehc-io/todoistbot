@@ -229,17 +229,42 @@ class URLScraper:
         return bool(re.match(pattern, url))
 
     @staticmethod
-    def is_pdf_url(url: str) -> bool:
-        base_url = url.split('#')[0]
-        return base_url.lower().endswith('.pdf')
+    def is_pdf_url(url: str, check_headers: bool = True) -> bool:
+        # First check patterns
+        url_lower = url.lower()
+        
+        # Quick pattern check
+        pdf_patterns = [
+            lambda u: u.split('#')[0].split('?')[0].endswith('.pdf'),
+            lambda u: 'arxiv.org/pdf/' in u,
+            # ... other patterns ...
+        ]
+        
+        if any(pattern(url_lower) for pattern in pdf_patterns):
+            return True
+        
+        # If pattern check fails and headers check is enabled, try HEAD request
+        if check_headers:
+            try:
+                response = requests.head(url, allow_redirects=True, timeout=5)
+                content_type = response.headers.get('Content-Type', '').lower()
+                return 'application/pdf' in content_type
+            except Exception:
+                # If request fails, fall back to pattern matching result
+                return False
+                
+        return False
 
     @staticmethod
     def is_youtube_url(url: str) -> bool:
         """Check if URL is a YouTube video or playlist."""
         youtube_patterns = [
-            r'https?://(?:www\.)?youtube\.com/watch\?v=[\w-]+',
-            r'https?://(?:www\.)?youtube\.com/playlist\?list=[\w-]+',
-            r'https?://youtu\.be/[\w-]+'
+            # Video patterns (including mobile)
+            r'https?://(?:(?:www|m)\.)?youtube\.com/watch\?v=[\w-]+',
+            r'https?://youtu\.be/[\w-]+',
+            
+            # Playlist patterns (including mobile)
+            r'https?://(?:(?:www|m)\.)?youtube\.com/playlist\?(?:[\w=&-]+&)?list=[\w-]+(?:&[\w=&-]+)?'
         ]
         return any(re.match(pattern, url) for pattern in youtube_patterns)
 
@@ -251,9 +276,11 @@ class URLScraper:
 
     @staticmethod
     def download_pdf(url: str) -> Optional[bytes]:
+        # print('downloading PDF')
         try:
             response = requests.get(url, timeout=30)
             response.raise_for_status()
+            # print(response.content)
             return response.content
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Error downloading PDF: {str(e)}")
@@ -262,6 +289,7 @@ class URLScraper:
     @staticmethod
     def extract_pdf_text(pdf_content: bytes) -> str:
         """Extract text content from PDF."""
+        # print('trying to extract pdf text')
         try:
             pdf_file = BytesIO(pdf_content)
             pdf_reader = PyPDF2.PdfReader(pdf_file)
@@ -703,7 +731,6 @@ class URLScraper:
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting search results: {str(e)}")
             return None
-
 
     @staticmethod
     def scrape_url(url: str, model: str = "gpt-4o-mini", selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:

@@ -77,11 +77,11 @@ def upload_to_drive(content: str, filename: str) -> str:
     """Upload content to Google Drive using service account."""
     # Use broader scope for testing
     SCOPES = ['https://www.googleapis.com/auth/drive']
-    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    folder_id = os.environ.get("GOOGLE_DRIVE_CAPTURE_FOLDER_ID")
     credentials_path = os.environ.get("GOOGLE_DRIVE_KEY")
 
     if not folder_id:
-        raise ValueError("GOOGLE_DRIVE_FOLDER_ID environment variable not found.")
+        raise ValueError("GOOGLE_DRIVE_CAPTURE_FOLDER_ID environment variable not found.")
     if not credentials_path:
         raise ValueError("GOOGLE_DRIVE_KEY environment variable not found.")
     
@@ -116,7 +116,7 @@ def upload_to_drive(content: str, filename: str) -> str:
         print(f"\nError uploading to Drive: {str(e)}")
         raise
 
-def generate_markdown(tasks_data: List[dict]) -> str:
+def _generate_markdown(tasks_data: List[dict]) -> str:
     """Generate markdown content from tasks data."""
     content = "# Todoist Tasks Report\n\n"
     content += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -143,6 +143,102 @@ def generate_markdown(tasks_data: List[dict]) -> str:
         content += "---\n\n"
     
     return content
+
+def clean_task_name(content: str) -> str:
+    """Convert task content to a clean name format."""
+    # Remove special characters and replace spaces with underscores
+    clean = re.sub(r'[^\w\s-]', '', content)
+    return clean.strip().replace(' ', '_').lower()[:30]
+
+def format_section(title: str, content: str | None) -> str:
+    """Format a section with title if content exists."""
+    if not content:
+        return ""
+    return f"### {title}\n{content}\n\n"
+
+def generate_markdown(tasks_data: List[dict]) -> str:
+    """
+    Generate formatted markdown content from tasks data with clear separation and task names.
+    
+    Args:
+        tasks_data: List of task dictionaries containing task information
+        
+    Returns:
+        Formatted markdown string
+    """
+    # Header section
+    content = [
+        "# Todoist Tasks Report",
+        "",
+        f"_Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_",
+        "",
+        "---",
+        "",
+        "## Table of Contents",
+        ""
+    ]
+    
+    # Filter out None values
+    valid_tasks = [task for task in tasks_data if task is not None]
+    
+    # Generate table of contents
+    for task in valid_tasks:
+        task_name = clean_task_name(task['content'])
+        content.append(f"- [{task['content']}](#{task_name})")
+    
+    content.append("\n---\n")
+    
+    # Generate task sections
+    for task in valid_tasks:
+        task_name = clean_task_name(task['content'])
+        
+        # Task header with anchor
+        content.extend([
+            f"## <a name='{task_name}'></a>{task['content']}",
+            ""
+        ])
+        
+        # Description section
+        if task['description']:
+            content.extend([
+                "### Description",
+                f"{task['description']}",
+                ""
+            ])
+        
+        # Labels section
+        if task['labels']:
+            content.extend([
+                "### Labels",
+                ", ".join([f"`{label}`" for label in task['labels']]),
+                ""
+            ])
+        
+        # URL content section
+        if task['urls_content']:
+            content.append("### Related Content")
+            for idx, url_data in enumerate(task['urls_content'], 1):
+                if url_data['content']:
+                    content_preview = url_data['content'][:2000]
+                    if len(url_data['content']) > 2000:
+                        content_preview += '...'
+                    
+                    content.extend([
+                        f"#### Content Source {idx}",
+                        "```",
+                        content_preview,
+                        "```",
+                        ""
+                    ])
+        
+        # Task separator
+        content.extend([
+            "<div style='page-break-after: always;'></div>",
+            "---",
+            ""
+        ])
+    
+    return "\n".join(content)
 
 def get_bypassed_project_ids(api: TodoistAPI, bypass_projects: str = None) -> Set[str]:
     """
