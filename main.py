@@ -347,28 +347,35 @@ def main():
     parser = argparse.ArgumentParser(description='Process Todoist tasks and extract URL contents')
     parser.add_argument('--no-close', action='store_true', help='Do not mark tasks as closed after processing')
     parser.add_argument('--max-tasks', type=int, help='Maximum number of tasks to process')
-    parser.add_argument('--bypass-projects', help='Comma-separated list of project names to bypass. If not specified, bypasses Inbox project by default')
     args = parser.parse_args()
 
     api = TodoistAPI(get_api_key())
     stats = TaskStats()
     
     try:
-        bypass_project_ids = get_bypassed_project_ids(api, args.bypass_projects)
-        
         all_tasks = api.get_tasks()
-        # Get total remaining tasks before filtering
-        stats.remaining_tasks = len([t for t in all_tasks if t.project_id not in bypass_project_ids])
         
-        # Filter out tasks from bypass projects and tasks with not-scrapeable label
-        tasks = [t for t in all_tasks if t.project_id not in bypass_project_ids]
+        # Get all projects to find the Capture project ID
+        projects = api.get_projects()
+        capture_project_ids = [p.id for p in projects if p.name.lower() == 'capture']
+        
+        if not capture_project_ids:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Warning: No project named 'Capture' found")
+            stats.print_summary()
+            return
+            
+        # Filter to only include tasks in the Capture project
+        tasks = [t for t in all_tasks if t.project_id in capture_project_ids]
+        
+        # Get total remaining tasks after filtering for the capture tag
+        stats.remaining_tasks = len(tasks)
         
         if args.max_tasks:
             tasks = tasks[:args.max_tasks]
             stats.remaining_tasks = max(0, stats.remaining_tasks - args.max_tasks)
 
         if not tasks:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ No tasks to process after filtering")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ No tasks with #capture tag found")
             stats.print_summary()
             return
 
@@ -391,13 +398,31 @@ def main():
         # Generate markdown content
         markdown_content = generate_markdown(tasks_data)
     
-        # Upload to Google Drive
+        # Save to local folder
         filename = f"{int(time.time())}-captured-notes.md"
+        
+        # Get save directory from environment variable or use current directory
+        import os
+        save_dir = os.environ.get('CAPTURED_NOTES_FOLDER', os.path.dirname(os.path.abspath(__file__)))
+        
+        # Create directory if it doesn't exist
         try:
-            drive_link = upload_to_drive(markdown_content, filename)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Report uploaded to Google Drive: {drive_link}")
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ Created directory: {save_dir}")
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Failed to upload to Google Drive: {str(e)}")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Could not create directory {save_dir}: {str(e)}")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ Using current directory instead")
+            save_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Save the file
+        file_path = os.path.join(save_dir, filename)
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(markdown_content)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Report saved to: {file_path}")
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Failed to save file: {str(e)}")
             stats.print_summary()
             exit(1)
 
@@ -408,6 +433,6 @@ def main():
         print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Fatal error: {str(error)}")
         stats.print_summary()
         exit(1)
-           
+
 if __name__ == "__main__":
     main()
