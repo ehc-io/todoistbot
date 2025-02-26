@@ -1,0 +1,12 @@
+{
+  "name": "x-scraper",
+  "version": "1.0.0",
+  "description": "Scraper for X.com",
+  "main": "gotox.js",
+  "scripts": {
+    "start": "node gotox.js"
+  },
+  "dependencies": {
+    "playwright": "^1.50.1"
+  }
+}
