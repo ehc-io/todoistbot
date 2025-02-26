@@ -116,34 +116,6 @@ def upload_to_drive(content: str, filename: str) -> str:
         print(f"\nError uploading to Drive: {str(e)}")
         raise
 
-def _generate_markdown(tasks_data: List[dict]) -> str:
-    """Generate markdown content from tasks data."""
-    content = "# Todoist Tasks Report\n\n"
-    content += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    
-    # Filter out None values (tasks with no content)
-    valid_tasks = [task for task in tasks_data if task is not None]
-    
-    for task_data in valid_tasks:
-        content += f"## {task_data['content']}\n\n"
-        
-        if task_data['description']:
-            content += f"Description: {task_data['description']}\n\n"
-        
-        if task_data['labels']:
-            content += "Labels: " + ", ".join(task_data['labels']) + "\n\n"
-        
-        if task_data['urls_content']:
-            for url_data in task_data['urls_content']:
-                content_text = url_data['content']
-                if content_text:
-                    content_preview = content_text[:2000] + ('...' if len(content_text) > 2000 else '')
-                    content += f"```\n{content_preview}\n```\n\n"
-        
-        content += "---\n\n"
-    
-    return content
-
 def clean_task_name(content: str) -> str:
     """Convert task content to a clean name format."""
     # Remove special characters and replace spaces with underscores
@@ -239,45 +211,6 @@ def generate_markdown(tasks_data: List[dict]) -> str:
         ])
     
     return "\n".join(content)
-
-def get_bypassed_project_ids(api: TodoistAPI, bypass_projects: str = None) -> Set[str]:
-    """
-    Get the project IDs that should be bypassed during processing.
-    By default, returns the Inbox project ID.
-    If bypass_projects is provided, returns the IDs of specified projects.
-    
-    Args:
-        api: TodoistAPI instance
-        bypass_projects: Comma-separated string of project names to bypass
-    
-    Returns:
-        Set of project IDs to bypass
-    """
-    try:
-        projects = api.get_projects()
-        
-        # If no specific projects are provided, bypass Inbox by default
-        if not bypass_projects:
-            return {p.id for p in projects if p.is_inbox_project}
-            
-        # Convert project names to lowercase for case-insensitive matching
-        bypass_names = {name.strip().lower() for name in bypass_projects.split(',')}
-        bypass_ids = set()
-        
-        for project in projects:
-            if project.name.lower() in bypass_names:
-                bypass_ids.add(project.id)
-                bypass_names.remove(project.name.lower())
-        
-        # Warn about any project names that weren't found
-        if bypass_names:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Warning: Projects not found: {', '.join(bypass_names)}")
-            
-        return bypass_ids
-        
-    except Exception as error:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Error getting projects: {str(error)}")
-        return set()
     
 def process_task(api: TodoistAPI, task, mark_closed: bool) -> dict:
     """
