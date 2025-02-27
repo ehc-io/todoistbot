@@ -173,3 +173,6 @@ report.md
 url_testing.py
 tweet-sample-output.md
 proto.ipynb
+node_modules/
+package-lock.json
+session-data/session.json
