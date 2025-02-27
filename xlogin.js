@@ -2,17 +2,50 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-const target_url = "https://x.com/home";
-const sessionDataDir = "session-data";
-const sessionDataPath = path.join(sessionDataDir, "session.json");
+// Configuration variables
+const TARGET_URL = "https://x.com/home";
+const SESSION_DATA_DIR = "session-data";
+const SESSION_DATA_PATH = path.join(SESSION_DATA_DIR, "session.json");
 
+// Timeout configurations (in milliseconds)
+const PAGE_LOAD_TIMEOUT = 3000;
+const LOGIN_WAIT_TIMEOUT = 10000;
+const FORM_INTERACTION_DELAY = 1500;
+const SELECTOR_TIMEOUT = 3000;
+
+/**
+ * Logger utility to provide consistent timestamp format
+ */
+class Logger {
+  static log(message) {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${message}`);
+  }
+  
+  static error(message, err) {
+    const timestamp = new Date().toISOString();
+    console.error(`[${timestamp}] ERROR: ${message}`, err || '');
+  }
+}
+
+/**
+ * Formats timestamp for filenames by replacing characters not allowed in filenames
+ * @returns {string} Formatted timestamp for filenames
+ */
+function getFormattedTimestamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+/**
+ * Main function to handle X.com session automation
+ */
 async function scrapeXHomepage() {
-  console.log('Starting X.com automation...');
+  Logger.log('Starting X.com session manager...');
   
   // Create session data directory if it doesn't exist
-  if (!fs.existsSync(sessionDataDir)) {
-    fs.mkdirSync(sessionDataDir, { recursive: true });
-    console.log(`Created session data directory: ${sessionDataDir}`);
+  if (!fs.existsSync(SESSION_DATA_DIR)) {
+    fs.mkdirSync(SESSION_DATA_DIR, { recursive: true });
+    Logger.log(`Created session data directory: ${SESSION_DATA_DIR}`);
   }
   
   // Get credentials from environment variables
@@ -24,7 +57,7 @@ async function scrapeXHomepage() {
   }
   
   // Launch browser
-  console.log('Launching browser...');
+  Logger.log('Launching browser...');
   const browser = await chromium.launch({
     headless: true
   });
@@ -35,88 +68,68 @@ async function scrapeXHomepage() {
     let hasValidSession = false;
     
     // Check if we have session data
-    if (fs.existsSync(sessionDataPath) && fs.readdirSync(sessionDataDir).length > 0) {
-      console.log('Found existing session data, attempting to restore session...');
+    if (fs.existsSync(SESSION_DATA_PATH)) {
+      Logger.log('Found existing session data, attempting to restore session...');
       try {
         // Load session data
-        const sessionData = JSON.parse(fs.readFileSync(sessionDataPath, 'utf8'));
+        const sessionData = JSON.parse(fs.readFileSync(SESSION_DATA_PATH, 'utf8'));
         context = await browser.newContext({
           storageState: sessionData
         });
         
         // Verify if session is still valid
         const page = await context.newPage();
-        await page.goto(target_url);
-        await page.waitForTimeout(3000);
+        await page.goto(TARGET_URL);
+        await page.waitForTimeout(PAGE_LOAD_TIMEOUT);
         
-        // Get and log the actual page title
-        const pageTitle = await page.title();
-        console.log(`After login, the page title is: "${pageTitle}"`);
-
-        // Verify login success using substring matching
+        // Verify login success
         const isLoginSuccessful = await page.evaluate(() => {
-          // Check if title contains "Home" instead of exact match
-          const title = document.title;
-          const isTitleCorrect = title.includes("Home");
-          
-          // Log what we found for debugging
-          if (!isTitleCorrect) {
-            console.log(`Unexpected page title: "${title}"`);
-          }
-          // Return true if verification method succeeds
-          return isTitleCorrect;
+          return document.title.includes("Home");
         });
 
-        if (!isLoginSuccessful) {
-          throw new Error('Login failed: Could not verify Title after login attempt');
-        }
-        
         if (isLoginSuccessful) {
-          console.log('Session is valid, continuing with existing session');
+          Logger.log('Session is valid, continuing with existing session');
           hasValidSession = true;
           
           // Take screenshot of valid session
-          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-          await page.screenshot({ path: `${timestamp}-valid-session.png` });
+          await page.screenshot({ path: `${getFormattedTimestamp()}-valid-session.png` });
         } else {
-          console.log('Session is no longer valid, will attempt fresh login');
+          Logger.log('Session is no longer valid, will attempt fresh login');
           await page.close();
           await context.close();
           context = null;
         }
       } catch (error) {
-        console.error('Error while restoring session:', error);
-        console.log('Will attempt fresh login');
+        Logger.error('Error while restoring session:', error);
+        Logger.log('Will attempt fresh login');
         if (context) await context.close();
         context = null;
       }
     } else {
-      console.log('No session data found, will perform login');
+      Logger.log('No session data found, will perform login');
     }
     
     // If session is not valid, perform login
     if (!hasValidSession) {
-      console.log('Creating new browser context for login...');
+      Logger.log('Creating new browser context for login...');
       context = await browser.newContext();
       const page = await context.newPage();
       
-      console.log('Navigating to X.com homepage...');
-      await page.goto(target_url);
-      await page.waitForTimeout(3000);
+      Logger.log('Navigating to X.com homepage...');
+      await page.goto(TARGET_URL);
+      await page.waitForTimeout(PAGE_LOAD_TIMEOUT);
       
       // Take initial screenshot
-      let Timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await page.screenshot({ path: `${Timestamp}-before-login.png` });
+      await page.screenshot({ path: `${getFormattedTimestamp()}-before-login.png` });
       
-      console.log(`Attempting to login with username: ${username}`);
+      Logger.log(`Attempting to login with username: ${username}`);
       
       // Fill username
-      await page.waitForSelector('input[name="text"]', { state: 'visible' });
+      await page.waitForSelector('input[name="text"]', { state: 'visible', timeout: SELECTOR_TIMEOUT });
       await page.fill('input[name="text"]', username);
       
-      // Take screenshot after putting usename
-      Timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await page.screenshot({ path: `${Timestamp}-after-username.png` });
+      // Take screenshot after putting username
+      await page.screenshot({ path: `${getFormattedTimestamp()}-after-username.png` });
 
       // Click Next button
       await page.evaluate(() => {
@@ -129,98 +142,65 @@ async function scrapeXHomepage() {
         }
       });
       
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(PAGE_LOAD_TIMEOUT);
 
       // Take screenshot after clicking Next
-      Timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await page.screenshot({ path: `${Timestamp}-after-next-button.png` });
+      await page.screenshot({ path: `${getFormattedTimestamp()}-after-next-button.png` });
 
-      // Wait for password field
-      await page.waitForSelector('input[name="password"]', { state: 'visible', timeout: 3000 });
-      
-      // Fill password
+      // Wait for password field and fill it
+      await page.waitForSelector('input[name="password"]', { state: 'visible', timeout: SELECTOR_TIMEOUT });
       await page.fill('input[name="password"]', password);
-
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(FORM_INTERACTION_DELAY);
 
       // Take screenshot after putting password
-      Timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await page.screenshot({ path: `${Timestamp}-after-password.png` });
+      await page.screenshot({ path: `${getFormattedTimestamp()}-after-password.png` });
 
       // Click Login button
-      await page.waitForSelector('button[data-testid="LoginForm_Login_Button"]', { state: 'visible' });
+      await page.waitForSelector('button[data-testid="LoginForm_Login_Button"]', { state: 'visible', timeout: SELECTOR_TIMEOUT });
       await page.click('button[data-testid="LoginForm_Login_Button"]');
       
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(LOGIN_WAIT_TIMEOUT);
 
       // Take screenshot after Login button
-      Timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await page.screenshot({ path: `${Timestamp}-after-login-button.png` });
-      
-      // Wait for navigation
-      await page.waitForTimeout(10000);
+      await page.screenshot({ path: `${getFormattedTimestamp()}-after-login-button.png` });
 
-      // Get and log the actual page title
-      const pageTitle = await page.title();
-      console.log(`After login, the page title is: "${pageTitle}"`);
-
-      // Verify login success using substring matching
+      // Verify login success
       const isLoginSuccessful = await page.evaluate(() => {
-        // Check if title contains "Home" instead of exact match
-        const title = document.title;
-        const isTitleCorrect = title.includes("Home");
-        
-        // Log what we found for debugging
-        if (!isTitleCorrect) {
-          console.log(`Unexpected page title: "${title}"`);
-        }
-        // Return true if verification method succeeds
-        return isTitleCorrect;
+        return document.title.includes("Home");
       });
 
       if (!isLoginSuccessful) {
-        throw new Error('Login failed: Could not verify Title after login attempt');
+        throw new Error('Login failed: Could not verify Home page after login attempt');
       }
       
-      console.log('Login successful');
+      Logger.log('Login successful');
       
       // Take screenshot after successful login
-      const afterLoginTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await page.screenshot({ path: `${afterLoginTimestamp}-after-login.png` });
+      await page.screenshot({ path: `${getFormattedTimestamp()}-after-login.png` });
       
       // Save session data
-      console.log('Saving session data...');
+      Logger.log('Saving session data...');
       const storageState = await context.storageState();
-      fs.writeFileSync(sessionDataPath, JSON.stringify(storageState, null, 2));
+      fs.writeFileSync(SESSION_DATA_PATH, JSON.stringify(storageState, null, 2));
       
       hasValidSession = true;
     }
     
-    // Continue with a valid session
+    // Instead of loading the page again, just provide success message
     if (hasValidSession) {
-      const page = await context.newPage();
-      await page.goto(target_url);
-      await page.waitForTimeout(3000);
-      
-      console.log('Successfully loaded X.com with valid session');
-      
-      // Get page title
-      const title = await page.title();
-      console.log(`\nPage Title: ${title}\n`);
-      
-      // Get visible text
-      const bodyText = await page.evaluate(() => document.body.innerText);
-      console.log('\nVisible Text (sample):');
-      console.log(bodyText.substring(0, 500) + '...');
-      
-      // You can add more functionality here
+      Logger.log('SUCCESS: X.com authentication credentials successfully obtained and stored');
     }
   } catch (error) {
-    console.error('An error occurred during execution:', error);
+    Logger.error('An error occurred during execution:', error);
+    throw error; // Re-throw to ensure the process exits with non-zero code on failure
   } finally {
-    console.log('Closing browser...');
+    Logger.log('Closing browser...');
     await browser.close();
   }
 }
 
-scrapeXHomepage();
+// Execute the main function
+scrapeXHomepage().catch(err => {
+  Logger.error('Fatal error:', err);
+  process.exit(1);
+});
