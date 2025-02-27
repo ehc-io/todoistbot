@@ -3,15 +3,10 @@ import os
 import re
 import argparse
 import time
-import json
-from typing import List, Dict, Set
+from typing import List
 from todoist_api_python.api import TodoistAPI
 from datetime import datetime
 from url_scraper import URLScraper
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-import io
 
 class TaskStats:
     def __init__(self):
@@ -73,49 +68,6 @@ def get_api_key() -> str:
         raise ValueError("TODOIST_API_KEY environment variable not set")
     return api_key
 
-def upload_to_drive(content: str, filename: str) -> str:
-    """Upload content to Google Drive using service account."""
-    # Use broader scope for testing
-    SCOPES = ['https://www.googleapis.com/auth/drive']
-    folder_id = os.environ.get("GOOGLE_DRIVE_CAPTURE_FOLDER_ID")
-    credentials_path = os.environ.get("GOOGLE_DRIVE_KEY")
-
-    if not folder_id:
-        raise ValueError("GOOGLE_DRIVE_CAPTURE_FOLDER_ID environment variable not found.")
-    if not credentials_path:
-        raise ValueError("GOOGLE_DRIVE_KEY environment variable not found.")
-    
-    credentials = service_account.Credentials.from_service_account_file(
-        credentials_path, scopes=SCOPES)
-    
-    service = build('drive', 'v3', credentials=credentials)
-
-    try:
-        file_metadata = {
-            'name': filename,
-            'parents': [folder_id]
-        }
-        
-        content_bytes = io.BytesIO(content.encode('utf-8'))
-        media = MediaIoBaseUpload(
-            content_bytes,
-            mimetype='text/plain',
-            resumable=True
-        )
-        
-        file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, webViewLink',
-            supportsAllDrives=True  # Add support for shared drives
-        ).execute()
-        
-        return file.get('webViewLink')
-        
-    except Exception as e:
-        print(f"\nError uploading to Drive: {str(e)}")
-        raise
-
 def clean_task_name(content: str) -> str:
     """Convert task content to a clean name format."""
     # Remove special characters and replace spaces with underscores
@@ -142,31 +94,22 @@ def generate_markdown(tasks_data: List[dict]) -> str:
     content = [
         "# Todoist Tasks Report",
         "",
-        f"_Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_",
+        f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "--"
         "",
-        "---",
-        "",
-        "## Table of Contents",
-        ""
     ]
     
     # Filter out None values
     valid_tasks = [task for task in tasks_data if task is not None]
     
-    # Generate table of contents
-    for task in valid_tasks:
-        task_name = clean_task_name(task['content'])
-        content.append(f"- [{task['content']}](#{task_name})")
-    
-    content.append("\n---\n")
-    
     # Generate task sections
-    for task in valid_tasks:
-        task_name = clean_task_name(task['content'])
+    for i, task in enumerate(valid_tasks):
+        # Use consistent anchor IDs that match the TOC
+        anchor_id = f"task-{i+1}"
         
         # Task header with anchor
         content.extend([
-            f"## <a name='{task_name}'></a>{task['content']}",
+            f"## {task['content']}",
             ""
         ])
         
@@ -186,20 +129,17 @@ def generate_markdown(tasks_data: List[dict]) -> str:
                 ""
             ])
         
-        # URL content section
+        # URL content section - directly include content without headers
         if task['urls_content']:
-            content.append("### Related Content")
-            for idx, url_data in enumerate(task['urls_content'], 1):
+            for url_data in task['urls_content']:
                 if url_data['content']:
                     content_preview = url_data['content'][:2000]
                     if len(url_data['content']) > 2000:
                         content_preview += '...'
                     
                     content.extend([
-                        f"#### Content Source {idx}",
-                        "```",
                         content_preview,
-                        "```",
+                        "",
                         ""
                     ])
         
