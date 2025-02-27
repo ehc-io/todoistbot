@@ -2,6 +2,7 @@
 import re
 import os
 import base64
+import json
 import tempfile
 import requests
 import pypandoc
@@ -26,9 +27,9 @@ class TwitterProcessor:
         
         for a_tag in soup.find_all('a', href=True):
             href = a_tag['href']
-            if not href.startswith('/') and not href.startswith('https://twitter.com'):
+            if not href.startswith('/') and not href.startswith('https://twitter.com') and not href.startswith('https://x.com'):
                 urls.append(href)
-        
+
         return list(set(urls))
 
     @staticmethod
@@ -593,95 +594,6 @@ class URLScraper:
             return ""
 
     @staticmethod
-    def _scrape_url(url: str, model: str = "gpt-4o-mini", selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
-        """Extended scrape_url method with YouTube support."""
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] → Starting to scrape URL: {url}")
-        
-        if not URLScraper.is_valid_url(url):
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid URL: {url}")
-            return None
-            
-        # Check if it's a YouTube URL
-        if URLScraper.is_youtube_url(url):
-            youtube_api_key = os.getenv('YOUTUBE_API_KEY')
-            if not youtube_api_key:
-                print("YOUTUBE_API_KEY environment variable is not set")
-                return None
-                
-            youtube_processor = YouTubeProcessor(youtube_api_key)
-            return URLScraper.process_youtube_content(url, youtube_processor)
-
-        # If it's a PDF, remove any fragment before processing
-        if URLScraper.is_pdf_url(url):
-            # Strip off anything after '#'
-            url = re.sub(r'#.*$', '', url)
-            # print(f"my_url_1: {url}")
-            return URLScraper.process_pdf_content(url, model=model)
-            
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context(
-                    viewport={'width': 1280, 'height': 800},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                )
-                page = context.new_page()
-                
-                try:
-                    page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                except PlaywrightTimeout:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Timeout loading page: {url}")
-                    return None
-                
-                # Check URL type and process accordingly
-                if URLScraper.is_twitter_url(url):
-                    result = URLScraper.process_twitter_content(page, url, model=model)
-                elif URLScraper.is_github_repo_url(url):
-                    result = URLScraper.process_github_content(page, url, model=model)
-                else:
-                    # Process regular webpage using Pandoc
-                    try:
-                        if selectors:
-                            result = {}
-                            for name, selector in selectors.items():
-                                elements = page.query_selector_all(selector)
-                                texts = []
-                                for el in elements:
-                                    html = el.evaluate('el => el.outerHTML')
-                                    if html:
-                                        text = URLScraper.extract_content_with_pandoc(html)
-                                        if text and text.strip():
-                                            texts.append(text.strip())
-                                result[name] = texts
-                        else:
-                            html = page.content()
-                            text_content = URLScraper.extract_content_with_pandoc(html)
-                            summary = URLScraper.get_webpage_summary(text_content, model=model)
-                            
-                            if text_content:
-                                result = {
-                                    'type': 'webpage',
-                                    'url': url,
-                                    'content': summary
-                                }
-                            else:
-                                result = None
-                    
-                    except Exception as e:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error extracting content: {str(e)}")
-                        return None
-                
-                browser.close()
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Successfully scraped URL: {url}")
-                return result
-                
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error scraping {url}:")
-            print(f"├── Error type: {type(e).__name__}")
-            print(f"└── Details: {str(e)}")
-            return None
-
-    @staticmethod
     def get_url_info_from_search(url: str) -> Optional[str]:
         """Get information about a URL using Google Custom Search API."""
         try:
@@ -732,9 +644,9 @@ class URLScraper:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting search results: {str(e)}")
             return None
 
-    @staticmethod
+    @staticmethod 
     def scrape_url(url: str, model: str = "gpt-4o-mini", selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
-        """Extended scrape_url method with screenshot fallback."""
+        """Extended scrape_url method with session support for Twitter/X.com."""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] → Starting to scrape URL: {url}")
         
         if not URLScraper.is_valid_url(url):
@@ -767,22 +679,44 @@ class URLScraper:
                     ]
                 )
                 
-                # Configure context with resource handling
-                context = browser.new_context(
-                    viewport={'width': 1280, 'height': 800},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                # Determine if we should use session data for Twitter/X.com
+                is_twitter_url = URLScraper.is_twitter_url(url) or 'x.com' in url.lower() or 'twitter.com' in url.lower()
+                
+                # Configure context with resource handling and session data if applicable
+                context_options = {
+                    'viewport': {'width': 1280, 'height': 800},
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                     # Reduce memory usage
-                    device_scale_factor=1,
+                    'device_scale_factor': 1,
                     # Disable features that might slow down loading
-                    is_mobile=False,
-                    has_touch=False
-                )
+                    'is_mobile': False,
+                    'has_touch': False
+                }
+                
+                # Load session data for Twitter/X.com if available
+                session_data_path = "session-data/session.json"
+                if is_twitter_url and os.path.exists(session_data_path):
+                    try:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Loading Twitter/X.com session data")
+                        with open(session_data_path, 'r') as f:
+                            session_data = json.load(f)
+                        context_options['storage_state'] = session_data
+                    except Exception as e:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error loading session data: {str(e)}")
+                
+                context = browser.new_context(**context_options)
                 page = context.new_page()
                 
                 # Set up request interception to block non-essential resources
-                page.route("**/*", lambda route: route.abort() 
-                    if route.request.resource_type in ['image', 'stylesheet', 'font', 'media'] 
-                    else route.continue_())
+                # For Twitter/X.com, we need styles and images for proper rendering
+                if is_twitter_url:
+                    page.route("**/*", lambda route: route.abort() 
+                        if route.request.resource_type in ['font', 'media'] 
+                        else route.continue_())
+                else:
+                    page.route("**/*", lambda route: route.abort() 
+                        if route.request.resource_type in ['image', 'stylesheet', 'font', 'media'] 
+                        else route.continue_())
                 
                 # Configure page for optimal loading
                 page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
@@ -792,7 +726,9 @@ class URLScraper:
                 page.on("console", lambda msg: print(f"Console {msg.type}: {msg.text}"))
                 
                 try:
-                    page.goto(url, wait_until='domcontentloaded', timeout=20000)
+                    # Use a longer timeout for Twitter/X.com pages since they might need more time to load with auth
+                    timeout = 30000 if is_twitter_url else 20000
+                    page.goto(url, wait_until='domcontentloaded', timeout=timeout)
                 except PlaywrightTimeout:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] Page failed to load: {url}")
                     print("Attempting to get information from search...")
@@ -808,12 +744,16 @@ class URLScraper:
                         }
                         return result
                     return None
-                except PlaywrightTimeout:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Timeout loading page: {url}")
-                    return None
                 
                 # Process based on URL type
-                if URLScraper.is_twitter_url(url):
+                if is_twitter_url:
+                    # Wait a bit longer for Twitter/X.com to load properly with the authenticated session
+                    page.wait_for_timeout(5000)
+                    
+                    # Check if we're logged in by looking for specific elements
+                    is_logged_in = page.query_selector('a[aria-label="Profile"]') is not None
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Twitter/X.com login status: {'Logged in' if is_logged_in else 'Not logged in'}")
+                    
                     result = URLScraper.process_twitter_content(page, url, model=model)
                 elif URLScraper.is_github_repo_url(url):
                     result = URLScraper.process_github_content(page, url, model=model)
@@ -860,7 +800,7 @@ class URLScraper:
                                 }
                     
                     except Exception as e:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error with Pandoc extraction, falling back to screenshot: {str(e)}")
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error with Pandoc extraction, falling back to web search: {str(e)}")
                         # Fallback to web search
                         search_info = URLScraper.get_url_info_from_search(url)
                         if search_info:
