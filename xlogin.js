@@ -6,6 +6,7 @@ const path = require('path');
 const TARGET_URL = "https://x.com/home";
 const SESSION_DATA_DIR = "session-data";
 const SESSION_DATA_PATH = path.join(SESSION_DATA_DIR, "session.json");
+const ENABLE_SCREENSHOTS = false; // Global flag to control screenshot capture
 
 // Timeout configurations (in milliseconds)
 const PAGE_LOAD_TIMEOUT = 3000;
@@ -34,6 +35,19 @@ class Logger {
  */
 function getFormattedTimestamp() {
   return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+/**
+ * Takes a screenshot if the ENABLE_SCREENSHOTS flag is true
+ * @param {Page} page - Playwright page object
+ * @param {string} filename - Base filename for the screenshot
+ * @returns {Promise<void>}
+ */
+async function takeScreenshotIfEnabled(page, filename) {
+  if (ENABLE_SCREENSHOTS) {
+    await page.screenshot({ path: `${getFormattedTimestamp()}-${filename}.png` });
+    Logger.log(`Screenshot captured: ${filename}`);
+  }
 }
 
 /**
@@ -91,8 +105,8 @@ async function scrapeXHomepage() {
           Logger.log('Session is valid, continuing with existing session');
           hasValidSession = true;
           
-          // Take screenshot of valid session
-          await page.screenshot({ path: `${getFormattedTimestamp()}-valid-session.png` });
+          // Take screenshot of valid session if enabled
+          await takeScreenshotIfEnabled(page, 'valid-session');
         } else {
           Logger.log('Session is no longer valid, will attempt fresh login');
           await page.close();
@@ -119,8 +133,8 @@ async function scrapeXHomepage() {
       await page.goto(TARGET_URL);
       await page.waitForTimeout(PAGE_LOAD_TIMEOUT);
       
-      // Take initial screenshot
-      await page.screenshot({ path: `${getFormattedTimestamp()}-before-login.png` });
+      // Take initial screenshot if enabled
+      await takeScreenshotIfEnabled(page, 'before-login');
       
       Logger.log(`Attempting to login with username: ${username}`);
       
@@ -128,8 +142,8 @@ async function scrapeXHomepage() {
       await page.waitForSelector('input[name="text"]', { state: 'visible', timeout: SELECTOR_TIMEOUT });
       await page.fill('input[name="text"]', username);
       
-      // Take screenshot after putting username
-      await page.screenshot({ path: `${getFormattedTimestamp()}-after-username.png` });
+      // Take screenshot after putting username if enabled
+      await takeScreenshotIfEnabled(page, 'after-username');
 
       // Click Next button
       await page.evaluate(() => {
@@ -144,16 +158,16 @@ async function scrapeXHomepage() {
       
       await page.waitForTimeout(PAGE_LOAD_TIMEOUT);
 
-      // Take screenshot after clicking Next
-      await page.screenshot({ path: `${getFormattedTimestamp()}-after-next-button.png` });
+      // Take screenshot after clicking Next if enabled
+      await takeScreenshotIfEnabled(page, 'after-next-button');
 
       // Wait for password field and fill it
       await page.waitForSelector('input[name="password"]', { state: 'visible', timeout: SELECTOR_TIMEOUT });
       await page.fill('input[name="password"]', password);
       await page.waitForTimeout(FORM_INTERACTION_DELAY);
 
-      // Take screenshot after putting password
-      await page.screenshot({ path: `${getFormattedTimestamp()}-after-password.png` });
+      // Take screenshot after putting password if enabled
+      await takeScreenshotIfEnabled(page, 'after-password');
 
       // Click Login button
       await page.waitForSelector('button[data-testid="LoginForm_Login_Button"]', { state: 'visible', timeout: SELECTOR_TIMEOUT });
@@ -161,8 +175,8 @@ async function scrapeXHomepage() {
       
       await page.waitForTimeout(LOGIN_WAIT_TIMEOUT);
 
-      // Take screenshot after Login button
-      await page.screenshot({ path: `${getFormattedTimestamp()}-after-login-button.png` });
+      // Take screenshot after Login button if enabled
+      await takeScreenshotIfEnabled(page, 'after-login-button');
 
       // Verify login success
       const isLoginSuccessful = await page.evaluate(() => {
@@ -175,8 +189,8 @@ async function scrapeXHomepage() {
       
       Logger.log('Login successful');
       
-      // Take screenshot after successful login
-      await page.screenshot({ path: `${getFormattedTimestamp()}-after-login.png` });
+      // Take screenshot after successful login if enabled
+      await takeScreenshotIfEnabled(page, 'after-login');
       
       // Save session data
       Logger.log('Saving session data...');
