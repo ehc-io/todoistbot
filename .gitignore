@@ -176,3 +176,4 @@ proto.ipynb
 node_modules/
 package-lock.json
 session-data/session.json
+todoist-proto.ipynb
