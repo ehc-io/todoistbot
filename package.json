@@ -1,10 +1,13 @@
 {
-  "name": "x-scraper",
+  "name": "xlogin",
   "version": "1.0.0",
-  "description": "Scraper for X.com",
-  "main": "gotox.js",
+  "description": "Login Automation for X.com",
+  "main": "xlogin.js",
   "scripts": {
-    "start": "node gotox.js"
+    "start": "node xlogin.js",
+    "install-browsers": "playwright install",
+    "install-deps": "playwright install-deps",
+    "setup": "npm install && npm run install-browsers && npm run install-deps"
   },
   "dependencies": {
     "playwright": "^1.50.1"
