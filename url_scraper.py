@@ -3,13 +3,15 @@ import re
 import os
 import base64
 import json
+import sys
 import tempfile
 import requests
 import pypandoc
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
-from litellm import completion
+from litellm import litellm, completion
+# litellm._turn_on_debug()
 import PyPDF2
 from io import BytesIO
 from bs4 import BeautifulSoup
@@ -305,8 +307,9 @@ class URLScraper:
             return ""
 
     @staticmethod
-    def get_webpage_summary(text: str, model: str = "gpt-4o-mini") -> str:
+    def get_webpage_summary(text: str, model: str = "gpt-4o") -> str:
         """Get summary of webpage content using LLM."""
+        print('heeeeeere')
         try:
             # Truncate text if too long (adjust limit based on model's context window)
             max_chars = 14000  # Adjust based on model's limits
@@ -454,7 +457,7 @@ class URLScraper:
             return None
 
     @staticmethod
-    def process_twitter_content(page, url: str, model: str = "gpt-4o-mini") -> Dict[str, Any]:
+    def process_twitter_content(page, url: str, model: str = "ollama/llava:7b"):
         """Process Twitter/X content using both screenshot analysis and HTML parsing."""
         try:
             # Wait for tweet to load
@@ -473,31 +476,32 @@ class URLScraper:
             # Take screenshot for vision model analysis
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                 tweet_element.screenshot(path=tmp.name)
-                base64_image = URLScraper.encode_image(tmp.name)
+                with open(tmp.name, "rb") as image_file:
+                    base64_image = base64.b64encode(image_file.read()).decode('utf-8')
                 os.unlink(tmp.name)
                 
-                # Use vision model for comprehensive analysis
+                # Use Ollama model for analysis
                 response = completion(
-                    model=model,
+                    model="ollama/llava:7b", 
                     messages=[
                         {
                             "role": "user",
                             "content": [
-                                {
-                                    "type": "text",
-                                    "text": "Please analyze this tweet and provide: 1) Main topic/subject, 2) Any media content description, 3) Notable engagement metrics if visible, 4) Any hashtags or key mentions"
-                                },
+                                {"type": "text", "text": f"Please analyze this tweet. The tweet content is: {tweet_text}. Provide: 1) Main topic/subject, 2) Any media content description if mentioned, 3) Notable engagement metrics if visible, 4) Any hashtags or key mentions"},
                                 {
                                     "type": "image_url",
-                                    "image_url": {"url": f"data:image/png;base64,{base64_image}"}
+                                    "image_url": {
+                                        "url": base64_image
+                                    }
                                 }
                             ]
                         }
-                    ]
+                    ],
+                    stream=False
+
                 )
-                
                 vision_analysis = response.choices[0].message.content if response.choices else None
-                
+
                 # Combine all information into a comprehensive summary
                 content_parts = []
                 
@@ -513,7 +517,7 @@ class URLScraper:
                 if tweet_text:
                     content_parts.append(f"\nTweet text:\n{tweet_text}")
                 
-                # Add vision model analysis
+                # Add model analysis
                 if vision_analysis:
                     content_parts.append(f"\nAnalysis:\n{vision_analysis}")
                 
@@ -525,7 +529,7 @@ class URLScraper:
                 
                 # Combine all parts into a single content string
                 combined_content = "\n".join(content_parts)
-                
+
                 return {
                     'type': 'twitter',
                     'url': url,
@@ -535,7 +539,7 @@ class URLScraper:
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Error processing Twitter content: {str(e)}")
             return None
-
+    
     @staticmethod
     def process_youtube_content(url: str, youtube_processor: YouTubeProcessor) -> Optional[Dict[str, Any]]:
         """Process YouTube video or playlist content."""
