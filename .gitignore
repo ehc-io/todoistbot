@@ -177,3 +177,6 @@ node_modules/
 package-lock.json
 session-data/session.json
 todoist-proto.ipynb
+main.py1
+url_scraper.py1
+.gitignore
