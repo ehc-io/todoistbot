@@ -12,6 +12,7 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from litellm import litellm, completion
 # litellm._turn_on_debug()
+
 import PyPDF2
 from io import BytesIO
 from bs4 import BeautifulSoup
@@ -140,7 +141,7 @@ class YouTubeProcessor:
             }
             
         except Exception as e:
-            print(f"Error fetching video details: {str(e)}")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error fetching video details: {str(e)}")
             return None
     
     def get_playlist_details(self, playlist_id: str, max_items: int = 50) -> Optional[Dict[str, Any]]:
@@ -191,9 +192,9 @@ class YouTubeProcessor:
             }
             
         except Exception as e:
-            print(f"Error fetching playlist details: {str(e)}")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error fetching playlist details: {str(e)}")
             return None 
-    
+
 class URLScraper:
     @staticmethod
     def clean_url(url: str) -> str:
@@ -307,9 +308,8 @@ class URLScraper:
             return ""
 
     @staticmethod
-    def get_webpage_summary(text: str, model: str = "gpt-4o") -> str:
+    def get_webpage_summary(text: str, text_model: str = "ollama/llama3.2:3b") -> str:
         """Get summary of webpage content using LLM."""
-        print('heeeeeere')
         try:
             # Truncate text if too long (adjust limit based on model's context window)
             max_chars = 14000  # Adjust based on model's limits
@@ -324,7 +324,7 @@ class URLScraper:
             
             messages = [{ "content": prompt, "role": "user"}]
             
-            response = completion(model=model, messages=messages)
+            response = completion(model=text_model, messages=messages)
             return response.choices[0].message.content if response.choices else "Summary generation failed."
             
         except Exception as e:
@@ -332,7 +332,7 @@ class URLScraper:
             return "Error generating summary"
 
     @staticmethod
-    def get_pdf_summary(text: str, model: str = "gpt-4o-mini") -> str:
+    def get_pdf_summary(text: str, text_model: str = "ollama/llama3.2:3b") -> str:
         """Get summary of PDF content using LLM."""
         try:
             # Truncate text if too long (adjust limit based on model's context window)
@@ -347,7 +347,7 @@ class URLScraper:
             
             messages = [{ "content": prompt, "role": "user"}]
             
-            response = completion(model=model, messages=messages)
+            response = completion(model=text_model, messages=messages)
             return response.choices[0].message.content if response.choices else "Summary generation failed."
             
         except Exception as e:
@@ -355,7 +355,7 @@ class URLScraper:
             return "Error generating summary"
 
     @staticmethod
-    def process_pdf_content(url: str, model: str = "gpt-4o-mini") -> Dict[str, Any]:
+    def process_pdf_content(url: str, text_model: str = "ollama/llama3.2:3b") -> Dict[str, Any]:
         """Process PDF content by extracting text and generating summary."""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Processing PDF from URL: {url}")
         
@@ -378,8 +378,7 @@ class URLScraper:
             }
 
         # Generate summary using specified model
-        summary = URLScraper.get_pdf_summary(text_content, model=model)
-        # print(summary)
+        summary = URLScraper.get_pdf_summary(text_content, text_model=text_model)
         return {
             'type': 'pdf',
             'url': url,
@@ -387,7 +386,7 @@ class URLScraper:
         }
 
     @staticmethod
-    def process_github_content(page, url: str, model: str = "gpt-4o-mini") -> Dict[str, Any]:
+    def process_github_content(page, url: str, text_model: str = "ollama/llama3.2:3b") -> Dict[str, Any]:
         """Process GitHub repository content (exact path) and generate summary."""
         try:
             # Navigate directly to the GitHub URL (no root repo fallback)
@@ -442,7 +441,7 @@ class URLScraper:
             {content_for_summary}"""
             
             messages = [{"content": prompt, "role": "user"}]
-            response = completion(model=model, messages=messages)
+            response = completion(model=text_model, messages=messages)
             summary = response.choices[0].message.content if response.choices else "Summary generation failed."
             
             return {
@@ -457,7 +456,7 @@ class URLScraper:
             return None
 
     @staticmethod
-    def process_twitter_content(page, url: str, model: str = "ollama/llava:7b"):
+    def process_twitter_content(page, url: str, vision_model: str = "ollama/llava:13b"):
         """Process Twitter/X content using both screenshot analysis and HTML parsing."""
         try:
             # Wait for tweet to load
@@ -480,9 +479,9 @@ class URLScraper:
                     base64_image = base64.b64encode(image_file.read()).decode('utf-8')
                 os.unlink(tmp.name)
                 
-                # Use Ollama model for analysis
+                # Use the configured vision model for analysis
                 response = completion(
-                    model="ollama/llava:7b", 
+                    model=vision_model, 
                     messages=[
                         {
                             "role": "user",
@@ -491,14 +490,13 @@ class URLScraper:
                                 {
                                     "type": "image_url",
                                     "image_url": {
-                                        "url": base64_image
+                                        "url": f"data:image/png;base64,{base64_image}"
                                     }
                                 }
                             ]
                         }
                     ],
                     stream=False
-
                 )
                 vision_analysis = response.choices[0].message.content if response.choices else None
 
@@ -648,8 +646,40 @@ class URLScraper:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting search results: {str(e)}")
             return None
 
+    # Filter function for console messages
+    @staticmethod
+    def filter_console_message(msg):
+        """Filter function for console messages - returns True for messages to be printed."""
+        # Ignore common resource load failures and network errors
+        ignore_patterns = [
+            "Failed to load resource",
+            "net::ERR_",
+            "status of 403",
+            "status of 404",
+            "status of 429"
+        ]
+        
+        msg_text = msg.text.lower()
+        
+        # Skip resource loading errors
+        if any(pattern.lower() in msg_text for pattern in ignore_patterns):
+            return False
+            
+        # Only log severe errors or explicit log messages
+        if msg.type == "error":
+            # Skip resource errors but keep JavaScript errors
+            if "failed to load resource" not in msg_text:
+                return True
+            return False
+        elif msg.type in ["warning", "info"]:
+            # Only show warnings or info if they're not about resource loading
+            return not any(pattern.lower() in msg_text for pattern in ignore_patterns)
+        
+        # Allow other message types (like log) through by default
+        return True
+
     @staticmethod 
-    def scrape_url(url: str, model: str = "gpt-4o-mini", selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
+    def scrape_url(url: str, text_model: str = "ollama/llama3.2:3b", vision_model: str = "ollama/llava:13b", selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
         """Extended scrape_url method with session support for Twitter/X.com."""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] → Starting to scrape URL: {url}")
         
@@ -659,16 +689,16 @@ class URLScraper:
             
         # Check for special URL types (YouTube, PDF, etc.)
         if URLScraper.is_youtube_url(url):
-            youtube_api_key = os.getenv('YOUTUBE_API_KEY')
+            youtube_api_key = os.getenv('YOUTUBE_DATA_API_KEY')
             if not youtube_api_key:
-                print("YOUTUBE_API_KEY environment variable is not set")
+                print("YOUTUBE_DATA_API_KEY environment variable is not set")
                 return None
             youtube_processor = YouTubeProcessor(youtube_api_key)
             return URLScraper.process_youtube_content(url, youtube_processor)
 
         if URLScraper.is_pdf_url(url):
-            url = re.sub(r'#.*$', '', url)
-            return URLScraper.process_pdf_content(url, model=model)
+            url = re.sub(r'#.*', '', url)
+            return URLScraper.process_pdf_content(url, text_model=text_model)
             
         try:
             with sync_playwright() as p:
@@ -725,9 +755,16 @@ class URLScraper:
                 # Configure page for optimal loading
                 page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
                 
-                # Enable JavaScript error handling
-                page.on("pageerror", lambda err: print(f"Page error: {err}"))
-                page.on("console", lambda msg: print(f"Console {msg.type}: {msg.text}"))
+                # Set up filtered console logging to suppress unwanted messages
+                def handle_console(msg):
+                    if URLScraper.filter_console_message(msg):
+                        print(f"Console {msg.type}: {msg.text}")
+                
+                # Only log page errors, not console messages
+                page.on("pageerror", lambda err: print(f"Page JavaScript error: {err}"))
+                
+                # Use our custom filter for console messages
+                page.on("console", handle_console)
                 
                 try:
                     # Use a longer timeout for Twitter/X.com pages since they might need more time to load with auth
@@ -758,9 +795,9 @@ class URLScraper:
                     is_logged_in = page.query_selector('a[aria-label="Profile"]') is not None
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] Twitter/X.com login status: {'Logged in' if is_logged_in else 'Not logged in'}")
                     
-                    result = URLScraper.process_twitter_content(page, url, model=model)
+                    result = URLScraper.process_twitter_content(page, url, vision_model=vision_model)
                 elif URLScraper.is_github_repo_url(url):
-                    result = URLScraper.process_github_content(page, url, model=model)
+                    result = URLScraper.process_github_content(page, url, text_model=text_model)
                 else:
                     # Try Pandoc extraction first
                     try:
@@ -795,7 +832,7 @@ class URLScraper:
                                 else:
                                     result = None
                             else:
-                                summary = URLScraper.get_webpage_summary(text_content, model=model)
+                                summary = URLScraper.get_webpage_summary(text_content, text_model=text_model)
                                 result = {
                                     'type': 'webpage',
                                     'url': url,

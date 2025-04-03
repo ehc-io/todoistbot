@@ -152,7 +152,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
     
     return "\n".join(content)
     
-def process_task(api: TodoistAPI, task, mark_closed: bool) -> dict:
+def _process_task(api: TodoistAPI, task, mark_closed: bool, text_model: str, vision_model: str) -> dict:
     """
     Process a single task and its URLs.
     Returns None if task has not-scrapeable label or if no valid content was scraped.
@@ -181,7 +181,7 @@ def process_task(api: TodoistAPI, task, mark_closed: bool) -> dict:
     successful_scrapes = False
     for url in urls:
         try:
-            scraped_content = URLScraper.scrape_url(url)
+            scraped_content = URLScraper.scrape_url(url, text_model=text_model, vision_model=vision_model)
             if scraped_content and scraped_content.get('content'):
                 task_data['urls_content'].append({
                     'url': url,
@@ -216,10 +216,86 @@ def process_task(api: TodoistAPI, task, mark_closed: bool) -> dict:
 
     return task_data
 
+def process_task(api: TodoistAPI, task, mark_closed: bool, text_model: str, vision_model: str) -> dict:
+    """
+    Process a single task and its URLs.
+    Returns None if task has not-scrapeable label or if no valid content was scraped.
+    In case of failure, adds 'not-scrapeable' label to the task.
+    """
+    NOT_SCRAPEABLE_LABEL = "not-scrapeable"
+    
+    # Skip processing if task already has not-scrapeable label
+    if NOT_SCRAPEABLE_LABEL in task.labels:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Skipping task {task.id}: has not-scrapeable label")
+        return None
+    
+    task_data = {
+        'content': task.content,
+        'description': task.description,
+        'labels': task.labels,
+        'urls_content': []
+    }
+
+    urls = URLExtractor.extract_markdown_urls(task.content)
+    if task.description:
+        urls.extend(URLExtractor.extract_markdown_urls(task.description))
+
+    urls = list(dict.fromkeys(url for url in urls if URLScraper.is_valid_url(url)))
+    
+    successful_scrapes = False
+    for url in urls:
+        try:
+            # Pass both text_model and vision_model to scrape_url
+            scraped_content = URLScraper.scrape_url(
+                url, 
+                text_model=text_model, 
+                vision_model=vision_model
+            )
+            
+            if scraped_content and scraped_content.get('content'):
+                task_data['urls_content'].append({
+                    'url': url,
+                    'content': scraped_content['content']
+                })
+                successful_scrapes = True
+            else:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ No content retrieved from URL: {url}")
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Error scraping URL {url}: {str(e)}")
+
+    if not successful_scrapes:
+        try:
+            # Add not-scrapeable label to the task
+            updated_labels = list(task.labels)
+            if NOT_SCRAPEABLE_LABEL not in updated_labels:
+                updated_labels.append(NOT_SCRAPEABLE_LABEL)
+                api.update_task(task_id=task.id, labels=updated_labels)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ↪ Task {task.id} marked as not-scrapeable")
+            return None
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Failed to update task {task.id} with not-scrapeable label: {str(e)}")
+            return None
+    
+    # Only close the task if we successfully scraped content and marking as closed is requested
+    if successful_scrapes and mark_closed:
+        try:
+            api.close_task(task_id=task.id)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Task {task.id} marked as completed")
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Failed to close task {task.id}: {str(e)}")
+
+    return task_data
+
+
 def main():
     parser = argparse.ArgumentParser(description='Process Todoist tasks and extract URL contents')
     parser.add_argument('--no-close', action='store_true', help='Do not mark tasks as closed after processing')
     parser.add_argument('--max-tasks', type=int, help='Maximum number of tasks to process')
+    parser.add_argument('--text-model', type=str, default='ollama/llama3.2:3b', 
+                       help='Text model to use for content summarization (default: llama3.2:3b)')
+    parser.add_argument('--vision-model', type=str, default='ollama/llava:7b',
+                       help='Vision model to use for image analysis (default: ollama/llava)')
+    parser.add_argument('--screen', action='store_true', help='Display output to screen instead of saving to file')
     args = parser.parse_args()
 
     api = TodoistAPI(get_api_key())
@@ -256,7 +332,7 @@ def main():
         for task in tasks:
             stats.total_tasks += 1
             print(f"[{datetime.now().strftime('%H:%M:%S')}] → Processing task: {task.content}")
-            task_data = process_task(api, task, not args.no_close)
+            task_data = process_task(api, task, not args.no_close, args.text_model, args.vision_model)
             if task_data:  # Only append if we got valid content
                 tasks_data.append(task_data)
                 stats.successful_tasks += 1
@@ -271,33 +347,40 @@ def main():
         # Generate markdown content
         markdown_content = generate_markdown(tasks_data)
     
-        # Save to local folder
-        filename = f"{int(time.time())}-captured-notes.md"
-        
-        # Get save directory from environment variable or use current directory
-        import os
-        save_dir = os.environ.get('CAPTURED_NOTES_FOLDER', os.path.dirname(os.path.abspath(__file__)))
-        
-        # Create directory if it doesn't exist
-        try:
-            if not os.path.exists(save_dir):
-                os.makedirs(save_dir)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ Created directory: {save_dir}")
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Could not create directory {save_dir}: {str(e)}")
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ Using current directory instead")
-            save_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # Save the file
-        file_path = os.path.join(save_dir, filename)
-        try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(markdown_content)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Report saved to: {file_path}")
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Failed to save file: {str(e)}")
-            stats.print_summary()
-            exit(1)
+        # If --screen option is used, print to screen instead of saving to file
+        if args.screen:
+            print("\n" + "="*80 + "\n")
+            print(markdown_content)
+            print("\n" + "="*80)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Output displayed to screen")
+        else:
+            # Save to local folder
+            filename = f"{int(time.time())}-captured-notes.md"
+            
+            # Get save directory from environment variable or use current directory
+            import os
+            save_dir = os.environ.get('CAPTURED_NOTES_FOLDER', os.path.dirname(os.path.abspath(__file__)))
+            
+            # Create directory if it doesn't exist
+            try:
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ Created directory: {save_dir}")
+            except Exception as e:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Could not create directory {save_dir}: {str(e)}")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ Using current directory instead")
+                save_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            # Save the file
+            file_path = os.path.join(save_dir, filename)
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(markdown_content)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Report saved to: {file_path}")
+            except Exception as e:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✕ Failed to save file: {str(e)}")
+                stats.print_summary()
+                exit(1)
 
         # Print final statistics
         stats.print_summary()
