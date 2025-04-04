@@ -180,3 +180,11 @@ todoist-proto.ipynb
 main.py1
 url_scraper.py1
 .gitignore
+screenshots/**
+session-data/.DS_Store
+.gitignore
+.DS_Store
+.gitignore
+todoistbot.code-workspace
+todoistbot.code-workspace
+.gitignore

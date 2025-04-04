@@ -9,97 +9,55 @@ import requests
 import pypandoc
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout, Error as PlaywrightError
 from litellm import litellm, completion
-# litellm._turn_on_debug()
+# litellm._turn_on_debug() # Keep commented unless debugging litellm
 
 import PyPDF2
 from io import BytesIO
 from bs4 import BeautifulSoup
 from googleapiclient.discovery import build
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
+# --- Import New Twitter Modules ---
+from twitter_session_manager import TwitterSessionManager
+from twitter_api_client import TwitterAPIClient
+from twitter_content_extractor import TwitterContentExtractor
+from twitter_media_downloader import TwitterMediaDownloader
+# ---
 
-class TwitterProcessor:
-    """Helper class for processing Twitter content."""
-    
-    @staticmethod
-    def extract_urls_from_html(html_content: str) -> List[str]:
-        """Extract all external URLs from tweet HTML."""
-        soup = BeautifulSoup(html_content, 'html.parser')
-        urls = []
-        
-        for a_tag in soup.find_all('a', href=True):
-            href = a_tag['href']
-            if not href.startswith('/') and not href.startswith('https://twitter.com') and not href.startswith('https://x.com'):
-                urls.append(href)
+import logging # Ensure logging is configured if not already
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-        return list(set(urls))
 
-    @staticmethod
-    def extract_tweet_text(html_content: str) -> str:
-        """Extract clean text content from tweet HTML."""
-        soup = BeautifulSoup(html_content, 'html.parser')
-        tweet_text_div = soup.find('div', {'data-testid': 'tweetText'})
-        
-        if not tweet_text_div:
-            return ""
-            
-        text_parts = []
-        for element in tweet_text_div.descendants:
-            if element.name == 'a':
-                if element.get('href', '').startswith('/'):
-                    text_parts.append(element.text)
-            elif isinstance(element, str):
-                text_parts.append(element.strip())
-                
-        return ' '.join(filter(None, text_parts))
-
-    @staticmethod
-    def extract_metadata(html_content: str) -> Dict[str, Any]:
-        """Extract additional metadata from tweet HTML."""
-        soup = BeautifulSoup(html_content, 'html.parser')
-        metadata = {}
-        
-        timestamp_elem = soup.find('time')
-        if timestamp_elem and timestamp_elem.get('datetime'):
-            metadata['timestamp'] = timestamp_elem['datetime']
-        
-        author_elem = soup.find('div', {'data-testid': 'User-Name'})
-        if author_elem:
-            metadata['author'] = {
-                'name': author_elem.text,
-                'handle': author_elem.find('span', text=re.compile(r'^@')).text if author_elem.find('span', text=re.compile(r'^@')) else None
-            }
-        
-        return metadata
-
+# --- Existing YouTubeProcessor (No changes needed here unless API key handling changes) ---
 class YouTubeProcessor:
     """Helper class for processing YouTube content using the YouTube Data API."""
-    
+
     def __init__(self, api_key: str):
-        """Initialize YouTube API client.
-        
-        Args:
-            api_key (str): YouTube Data API key
-        """
-        self.youtube = build('youtube', 'v3', developerKey=api_key)
-    
+        """Initialize YouTube API client."""
+        try:
+            self.youtube = build('youtube', 'v3', developerKey=api_key)
+            self.api_key_valid = True
+        except Exception as e:
+             logger.error(f"Failed to initialize YouTube API client: {e}")
+             self.youtube = None
+             self.api_key_valid = False
+
     @staticmethod
     def extract_video_id(url: str) -> Optional[str]:
         """Extract video ID from various YouTube URL formats."""
-        # Handle youtu.be URLs
         if 'youtu.be' in url:
-            return url.split('/')[-1].split('?')[0]
-        
-        # Handle youtube.com URLs
+            path_part = urlparse(url).path
+            if path_part:
+                return path_part.lstrip('/')
         parsed_url = urlparse(url)
         if 'youtube.com' in parsed_url.netloc:
             query_params = parse_qs(parsed_url.query)
             if 'v' in query_params:
                 return query_params['v'][0]
-        
         return None
-    
+
     @staticmethod
     def extract_playlist_id(url: str) -> Optional[str]:
         """Extract playlist ID from YouTube URL."""
@@ -109,757 +67,840 @@ class YouTubeProcessor:
             if 'list' in query_params:
                 return query_params['list'][0]
         return None
-    
+
     def get_video_details(self, video_id: str) -> Optional[Dict[str, Any]]:
         """Fetch video details using YouTube API."""
+        if not self.api_key_valid or not self.youtube:
+             logger.error("YouTube API key is invalid or client not initialized.")
+             return None
         try:
             request = self.youtube.videos().list(
                 part="snippet,statistics",
                 id=video_id
             )
             response = request.execute()
-            
-            if not response['items']:
+
+            if not response.get('items'):
+                logger.warning(f"No video details found for YouTube video ID: {video_id}")
                 return None
-            
+
             video = response['items'][0]
-            snippet = video['snippet']
-            statistics = video['statistics']
-            
+            snippet = video.get('snippet', {})
+            statistics = video.get('statistics', {})
+
             return {
-                'type': 'youtube_video',
-                'video_id': video_id,
-                'url': f'https://youtube.com/watch?v={video_id}',
-                'content': {
-                    'title': snippet['title'],
-                    'description': snippet['description'],
-                    'published_at': snippet['publishedAt'],
-                    'channel_title': snippet['channelTitle'],
-                    'view_count': statistics.get('viewCount', 'N/A'),
-                    'like_count': statistics.get('likeCount', 'N/A')
-                }
+                'title': snippet.get('title', 'N/A'),
+                'description': snippet.get('description', ''),
+                'published_at': snippet.get('publishedAt', ''),
+                'channel_title': snippet.get('channelTitle', 'N/A'),
+                'view_count': statistics.get('viewCount', 'N/A'),
+                'like_count': statistics.get('likeCount', 'N/A')
             }
-            
+
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error fetching video details: {str(e)}")
+            logger.error(f"Error fetching YouTube video details for ID {video_id}: {str(e)}")
             return None
-    
-    def get_playlist_details(self, playlist_id: str, max_items: int = 50) -> Optional[Dict[str, Any]]:
+
+    def get_playlist_details(self, playlist_id: str, max_items: int = 10) -> Optional[Dict[str, Any]]: # Reduced default max_items
         """Fetch playlist details and items using YouTube API."""
+        if not self.api_key_valid or not self.youtube:
+             logger.error("YouTube API key is invalid or client not initialized.")
+             return None
         try:
-            # First get playlist details
             playlist_request = self.youtube.playlists().list(
                 part="snippet",
                 id=playlist_id
             )
             playlist_response = playlist_request.execute()
-            
-            if not playlist_response['items']:
-                return None
-            
+
+            if not playlist_response.get('items'):
+                 logger.warning(f"No playlist details found for YouTube playlist ID: {playlist_id}")
+                 return None
+
             playlist = playlist_response['items'][0]
-            snippet = playlist['snippet']
-            
-            # Then get playlist items
+            snippet = playlist.get('snippet', {})
+
             items_request = self.youtube.playlistItems().list(
                 part="snippet",
                 playlistId=playlist_id,
-                maxResults=max_items
+                maxResults=min(max_items, 50) # API max is 50
             )
             items_response = items_request.execute()
-            
+
             videos = []
             for item in items_response.get('items', []):
-                video_snippet = item['snippet']
-                videos.append({
-                    'title': video_snippet['title'],
-                    'video_id': video_snippet['resourceId']['videoId'],
-                    'position': video_snippet['position'] + 1
-                })
-            
+                video_snippet = item.get('snippet', {})
+                resource_id = video_snippet.get('resourceId', {})
+                if video_snippet and resource_id.get('kind') == 'youtube#video':
+                    videos.append({
+                        'title': video_snippet.get('title', 'N/A'),
+                        'video_id': resource_id.get('videoId'),
+                        'position': video_snippet.get('position', -1) + 1
+                    })
+
             return {
-                'type': 'youtube_playlist',
-                'playlist_id': playlist_id,
-                'url': f'https://youtube.com/playlist?list={playlist_id}',
-                'content': {
-                    'title': snippet['title'],
-                    'description': snippet['description'],
-                    'channel_title': snippet['channelTitle'],
-                    'published_at': snippet['publishedAt'],
-                    'video_count': len(videos),
-                    'videos': videos
-                }
+                'title': snippet.get('title', 'N/A'),
+                'description': snippet.get('description', ''),
+                'channel_title': snippet.get('channelTitle', 'N/A'),
+                'published_at': snippet.get('publishedAt', ''),
+                'item_count': playlist.get('contentDetails', {}).get('itemCount', len(videos)), # Get total count if available
+                'videos_preview': videos # List first few videos
             }
-            
+
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error fetching playlist details: {str(e)}")
-            return None 
+            logger.error(f"Error fetching YouTube playlist details for ID {playlist_id}: {str(e)}")
+            return None
+
+# --- End YouTubeProcessor ---
+
 
 class URLScraper:
+    # --- Existing static methods (clean_url, is_valid_url, etc.) ---
+    # Keep these as they are useful helpers.
+    # Ensure is_twitter_url checks for x.com too.
     @staticmethod
     def clean_url(url: str) -> str:
         """Clean and normalize URL."""
-        url = re.sub(r'[)\]]$', '', url)
-        if '#' in url and not any(x in url for x in ['#page=', '#section=']):
-            url = url.split('#')[0]
-        url = url.replace('x.com', 'twitter.com')
-        return url.strip()
+        url = url.strip()
+        # Remove trailing punctuation that might be artifacts
+        url = re.sub(r'[\]\)]+$', '', url)
+        # Handle markdown link leftovers if any
+        url = url.strip('<>')
+        # Normalize domain for Twitter/X
+        url = url.replace('//x.com', '//twitter.com') # Prefer twitter.com for consistency internally? Or keep x.com? Let's keep x.com for now.
+        # Remove tracking parameters, common ones
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        # Common trackers to remove (add more as needed)
+        trackers = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'fbclid', 'gclid', 'mc_cid', 'mc_eid', 'si']
+        filtered_query = {k: v for k, v in query.items() if k.lower() not in trackers}
+        # Rebuild URL without trackers and fragment unless it's a page/section marker
+        fragment = ''
+        if parsed.fragment and ('page=' in parsed.fragment or 'section=' in parsed.fragment or parsed.fragment.startswith('h.')): # Keep PDF page fragments or specific section markers
+             fragment = parsed.fragment
+
+        url_no_trackers = parsed._replace(query=urlencode(filtered_query, doseq=True), fragment=fragment).geturl()
+        # Remove trailing slash if it's not the root path
+        if url_no_trackers.endswith('/') and url_no_trackers.count('/') > 2:
+             url_no_trackers = url_no_trackers.rstrip('/')
+
+        return url_no_trackers
 
     @staticmethod
     def is_valid_url(url: str) -> bool:
-        """Validate URL and check if it's scrapeable."""
+        """Validate URL structure."""
         try:
             result = urlparse(url)
-            return all([result.scheme, result.netloc])
-        except:
+            # Requires scheme (http/https) and netloc (domain)
+            return all([result.scheme in ['http', 'https'], result.netloc])
+        except ValueError: # Handle potential errors from urlparse on weird inputs
             return False
 
     @staticmethod
     def extract_urls(text: str) -> List[str]:
-        """Extract and clean URLs from text."""
-        url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        """Extract and clean URLs from text. Handles markdown."""
+        if not text: return []
+
+        # Enhanced regex to capture URLs within markdown and plain text
+        # Avoids capturing markdown syntax itself, captures URLs ending with ) if part of the URL
+        url_pattern = r'https?://(?:[a-zA-Z0-9\-_./?=&%~+:@!$,]|(?<=\()\S+(?=\))|\(\S+\))+'
         urls = re.findall(url_pattern, text)
-        return [URLScraper.clean_url(url) for url in urls]
+
+        # Extract from explicit markdown links [text](url)
+        markdown_pattern = r'\[[^\]]*\]\((?P<url>https?://[^\)]+)\)'
+        md_urls = [match.group('url') for match in re.finditer(markdown_pattern, text)]
+
+        # Combine, clean, and deduplicate
+        all_urls = list(dict.fromkeys([URLScraper.clean_url(u) for u in urls + md_urls]))
+        return [u for u in all_urls if URLScraper.is_valid_url(u)] # Final validity check
 
     @staticmethod
     def is_twitter_url(url: str) -> bool:
-        """Check if URL is a Twitter/X post."""
-        return bool(re.match(r'https?://(twitter\.com|x\.com)/\w+/status/\d+', url))
+        """Check if URL is a Twitter/X status/post URL."""
+        # Match twitter.com/user/status/id or x.com/user/status/id
+        return bool(re.match(r'https?://(?:www\.)?(?:twitter\.com|x\.com)/[^/]+/status/\d+', url))
 
     @staticmethod
     def is_github_repo_url(url: str) -> bool:
         """Check if URL is a GitHub repository or sub-path."""
-        pattern = r'https?://github\.com/[^/]+/[^/]+'
+        # Matches github.com/user/repo or github.com/user/repo/path...
+        pattern = r'https?://github\.com/[^/]+/[^/]+(/.*)?'
         return bool(re.match(pattern, url))
 
     @staticmethod
     def is_pdf_url(url: str, check_headers: bool = True) -> bool:
-        # First check patterns
-        url_lower = url.lower()
-        
-        # Quick pattern check
-        pdf_patterns = [
-            lambda u: u.split('#')[0].split('?')[0].endswith('.pdf'),
-            lambda u: 'arxiv.org/pdf/' in u,
-            # ... other patterns ...
-        ]
-        
-        if any(pattern(url_lower) for pattern in pdf_patterns):
+        """Check if URL likely points to a PDF."""
+        url_lower = url.lower().split('?')[0].split('#')[0] # Check path before query/fragment
+        if url_lower.endswith('.pdf'):
             return True
-        
-        # If pattern check fails and headers check is enabled, try HEAD request
+        if 'arxiv.org/pdf/' in url_lower:
+             return True
+
         if check_headers:
             try:
-                response = requests.head(url, allow_redirects=True, timeout=5)
+                # Use HEAD request to check Content-Type without downloading body
+                response = requests.head(url, allow_redirects=True, timeout=10)
+                response.raise_for_status() # Check for HTTP errors
                 content_type = response.headers.get('Content-Type', '').lower()
-                return 'application/pdf' in content_type
-            except Exception:
-                # If request fails, fall back to pattern matching result
-                return False
-                
-        return False
+                if 'application/pdf' in content_type:
+                    return True
+            except requests.exceptions.RequestException as e:
+                 # Log warning but don't fail if HEAD request has issues (e.g., HEAD not allowed)
+                 logger.debug(f"HEAD request for PDF check failed for {url}: {e}. Relying on URL pattern.")
+            except Exception as e:
+                 logger.debug(f"Unexpected error during PDF check HEAD request for {url}: {e}")
+
+        return False # Default to false if pattern and headers don't confirm
 
     @staticmethod
     def is_youtube_url(url: str) -> bool:
         """Check if URL is a YouTube video or playlist."""
-        youtube_patterns = [
-            # Video patterns (including mobile)
-            r'https?://(?:(?:www|m)\.)?youtube\.com/watch\?v=[\w-]+',
+        # Updated patterns for common YouTube URL formats
+        video_patterns = [
+            r'https?://(?:www\.)?youtube\.com/watch\?.*v=[\w-]+',
             r'https?://youtu\.be/[\w-]+',
-            
-            # Playlist patterns (including mobile)
-            r'https?://(?:(?:www|m)\.)?youtube\.com/playlist\?(?:[\w=&-]+&)?list=[\w-]+(?:&[\w=&-]+)?'
+            r'https?://(?:www\.)?youtube\.com/embed/[\w-]+',
+            r'https?://(?:www\.)?youtube\.com/v/[\w-]+',
+            r'https?://m\.youtube\.com/watch\?.*v=[\w-]+' # Mobile
         ]
-        return any(re.match(pattern, url) for pattern in youtube_patterns)
+        playlist_patterns = [
+            r'https?://(?:www\.)?youtube\.com/playlist\?.*list=[\w-]+',
+            r'https?://m\.youtube\.com/playlist\?.*list=[\w-]+' # Mobile
+        ]
+        return any(re.match(p, url) for p in video_patterns + playlist_patterns)
 
-    @staticmethod
-    def encode_image(image_path: str) -> str:
-        """Encode image to base64 string."""
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode("utf-8")
-
+    # --- Keep PDF processing methods ---
     @staticmethod
     def download_pdf(url: str) -> Optional[bytes]:
-        # print('downloading PDF')
+        logger.debug(f"Downloading PDF from: {url}")
         try:
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, timeout=30, headers={ # Add a user-agent
+                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                 })
             response.raise_for_status()
-            # print(response.content)
+            # Check content type again just in case
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'application/pdf' not in content_type:
+                 logger.warning(f"Downloaded content from {url} does not have PDF Content-Type: {content_type}")
+                 # Decide whether to proceed or return None
+                 # Let's proceed but log, PyPDF2 will likely fail if it's not PDF
             return response.content
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error downloading PDF: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error downloading PDF from {url}: {str(e)}")
             return None
 
     @staticmethod
     def extract_pdf_text(pdf_content: bytes) -> str:
-        """Extract text content from PDF."""
-        # print('trying to extract pdf text')
+        """Extract text content from PDF bytes."""
+        logger.debug("Extracting text from PDF content...")
+        text_content = []
         try:
             pdf_file = BytesIO(pdf_content)
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-            text_content = []
-            
-            for page in pdf_reader.pages:
-                text_content.append(page.extract_text())
-            
-            return "\n".join(text_content)
+            pdf_reader = PyPDF2.PdfReader(pdf_file, strict=False) # Use strict=False for leniency
+
+            # Check if PDF is encrypted and cannot be read
+            if pdf_reader.is_encrypted:
+                 logger.warning("PDF is encrypted and cannot be processed.")
+                 # Try decrypting with an empty password (common for some PDFs)
+                 try:
+                     if pdf_reader.decrypt('') == 0: # 0 means decryption failed
+                         return "[Error: PDF is encrypted]"
+                     # If decryption succeeded (returns 1 or 2), proceed
+                 except NotImplementedError:
+                      logger.error("PDF decryption algorithm not supported by PyPDF2.")
+                      return "[Error: Unsupported PDF encryption]"
+                 except Exception as decrypt_e:
+                      logger.error(f"Error during PDF decryption attempt: {decrypt_e}")
+                      return "[Error: Failed to decrypt PDF]"
+
+
+            num_pages = len(pdf_reader.pages)
+            logger.debug(f"PDF has {num_pages} pages.")
+            for i, page in enumerate(pdf_reader.pages):
+                 try:
+                     page_text = page.extract_text()
+                     if page_text:
+                          text_content.append(page_text)
+                     # else: logger.debug(f"Page {i+1} yielded no text.")
+                 except Exception as page_e:
+                      logger.warning(f"Error extracting text from PDF page {i+1}: {page_e}")
+                      # Continue with other pages
+
+            full_text = "\n".join(text_content).strip()
+            logger.debug(f"Extracted {len(full_text)} characters from PDF.")
+            # Basic cleanup
+            full_text = re.sub(r'\s+\n', '\n', full_text) # Remove trailing spaces before newlines
+            full_text = re.sub(r'\n{3,}', '\n\n', full_text) # Collapse excessive newlines
+            return full_text
+
+        except PyPDF2.errors.PdfReadError as pdf_err:
+             logger.error(f"PyPDF2 error reading PDF: {pdf_err}")
+             return "[Error: Invalid or corrupt PDF file]"
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error extracting PDF text: {str(e)}")
-            return ""
+            logger.error(f"Unexpected error extracting PDF text: {str(e)}")
+            return "[Error: Failed to extract text from PDF]"
+
+    # --- Keep LLM summarization methods ---
+    @staticmethod
+    def _call_llm_completion(prompt: str, text_model: str, max_tokens: int = 150) -> str:
+         """Helper function to call the LLM completion API."""
+         try:
+             messages = [{"content": prompt, "role": "user"}]
+             # Use context manager for potential temporary env var setting if needed
+             # with litellm.utils.set_verbose(False): # Reduce litellm verbosity if desired
+             response = completion(
+                 model=text_model,
+                 messages=messages,
+                 max_tokens=max_tokens, # Limit output size
+                 temperature=0.5, # Lower temperature for factual summary
+                 # Add other parameters like top_p if needed
+             )
+             # Accessing content correctly for LiteLLM v1+
+             if response.choices and response.choices[0].message and response.choices[0].message.content:
+                  summary = response.choices[0].message.content.strip()
+                  # Optional: Post-process summary (remove boilerplate, etc.)
+                  return summary
+             else:
+                  logger.warning(f"LLM response structure invalid or content missing. Response: {response}")
+                  return "Summary generation failed (Invalid LLM response)."
+
+         except Exception as e:
+             # Catch specific LiteLLM errors if possible
+             logger.error(f"Error calling LLM ({text_model}) for summary: {e}")
+             # Log traceback for detailed debugging if needed
+             # import traceback
+             # logger.error(traceback.format_exc())
+             return f"Error generating summary: {e}"
+
 
     @staticmethod
     def get_webpage_summary(text: str, text_model: str = "ollama/llama3.2:3b") -> str:
         """Get summary of webpage content using LLM."""
-        try:
-            # Truncate text if too long (adjust limit based on model's context window)
-            max_chars = 14000  # Adjust based on model's limits
-            if len(text) > max_chars:
-                text = text[:max_chars] + "..."
+        if not text: return "No content to summarize."
 
-            prompt = f"""Please provide a 100 word summary of this webpage content. 
-            Focus on the main points and key information.
-            
-            Content:
-            {text}"""
-            
-            messages = [{ "content": prompt, "role": "user"}]
-            
-            response = completion(model=text_model, messages=messages)
-            return response.choices[0].message.content if response.choices else "Summary generation failed."
-            
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error generating webpage summary: {str(e)}")
-            return "Error generating summary"
+        # Truncate text (use a token estimator or char count)
+        # Average token length is ~4 chars. Target ~3500 tokens = ~14000 chars.
+        max_chars = 14000
+        if len(text) > max_chars:
+            text = text[:max_chars] + "..."
+            logger.debug(f"Truncated webpage text to {max_chars} chars for summarization.")
+
+        prompt = f"""Please provide a concise summary (around 100 words) of the following webpage content. Focus on the main topic, key points, and conclusions.
+
+Webpage Content:
+\"\"\"
+{text}
+\"\"\"
+
+Summary:"""
+        return URLScraper._call_llm_completion(prompt, text_model, max_tokens=150)
+
 
     @staticmethod
     def get_pdf_summary(text: str, text_model: str = "ollama/llama3.2:3b") -> str:
         """Get summary of PDF content using LLM."""
-        try:
-            # Truncate text if too long (adjust limit based on model's context window)
-            max_chars = 14000
-            if len(text) > max_chars:
-                text = text[:max_chars] + "..."
+        if not text: return "No content to summarize."
+        if text.startswith("[Error:"): return text # Pass through extraction errors
 
-            prompt = f"""Please provide a 100 word summary of the content. 
-            
-            Content:
-            {text}"""
-            
-            messages = [{ "content": prompt, "role": "user"}]
-            
-            response = completion(model=text_model, messages=messages)
-            return response.choices[0].message.content if response.choices else "Summary generation failed."
-            
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error generating summary: {str(e)}")
-            return "Error generating summary"
+        max_chars = 14000 # Same limit as webpage
+        if len(text) > max_chars:
+            text = text[:max_chars] + "..."
+            logger.debug(f"Truncated PDF text to {max_chars} chars for summarization.")
 
-    @staticmethod
-    def process_pdf_content(url: str, text_model: str = "ollama/llama3.2:3b") -> Dict[str, Any]:
-        """Process PDF content by extracting text and generating summary."""
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Processing PDF from URL: {url}")
-        
-        # Download PDF
-        pdf_content = URLScraper.download_pdf(url)
-        if not pdf_content:
-            return {
-                'type': 'pdf',
-                'url': url,
-                'error': 'Failed to download PDF'
-            }
+        prompt = f"""Please provide a concise summary (around 100 words) of the following document content, likely from a PDF. Focus on the main topic, key findings, arguments, or purpose.
 
-        # Extract text
-        text_content = URLScraper.extract_pdf_text(pdf_content)
-        if not text_content:
-            return {
-                'type': 'pdf',
-                'url': url,
-                'error': 'Failed to extract text from PDF'
-            }
+Document Content:
+\"\"\"
+{text}
+\"\"\"
 
-        # Generate summary using specified model
-        summary = URLScraper.get_pdf_summary(text_content, text_model=text_model)
-        return {
-            'type': 'pdf',
-            'url': url,
-            'content': summary
-        }
+Summary:"""
+        return URLScraper._call_llm_completion(prompt, text_model, max_tokens=150)
+
 
     @staticmethod
-    def process_github_content(page, url: str, text_model: str = "ollama/llama3.2:3b") -> Dict[str, Any]:
-        """Process GitHub repository content (exact path) and generate summary."""
-        try:
-            # Navigate directly to the GitHub URL (no root repo fallback)
-            page.goto(url, wait_until='domcontentloaded', timeout=30000)
-            
-            # Wait for repository content to load (10-second timeout)
-            page.wait_for_selector('div#repo-content-pjax-container', timeout=10000)
-            
-            # Extract "About" text if available
-            about_section = page.query_selector('.Layout-sidebar .f4')
-            about_text = about_section.text_content().strip() if about_section else ""
-            
-            # Extract README or page content if available
-            readme = page.query_selector('article.markdown-body')
-            readme_text = readme.text_content().strip() if readme else ""
-            
-            # Attempt to gather basic repository stats if visible
-            stars_el = page.query_selector('#repo-stars-counter-star')
-            forks_el = page.query_selector('#repo-network-counter')
-            watchers_el = page.query_selector('#repo-watchers-counter')
-            stats = {
-                'stars': stars_el.text_content().strip() if stars_el else "N/A",
-                'forks': forks_el.text_content().strip() if forks_el else "N/A",
-                'watchers': watchers_el.text_content().strip() if watchers_el else "N/A",
-            }
-            
-            # Look for any additional content on this specific path
-            specific_content = page.query_selector('article.markdown-body, .Box-body')
-            if specific_content:
-                specific_text = specific_content.text_content().strip()
-                # Combine "specific" content with the existing readme text
-                readme_text = f"Specific path content:\n{specific_text}\n\nRepository overview:\n{readme_text}"
-            
-            # Combine content for summarization
-            content_for_summary = f"""
-            Repository URL: {url}
-            About: {about_text}
-            
-            Content: {readme_text}
-            
-            Repository Statistics:
-            - Stars: {stats['stars']}
-            - Forks: {stats['forks']}
-            - Watchers: {stats['watchers']}
-            """
-            
-            # Generate summary using LLM
-            prompt = f"""Please provide a 100 word summary of this GitHub project.
-            Disregard whatever is related to the Github service itself. Consider only information related to the particular project this page points to.
-            
-            Repository Content:
-            {content_for_summary}"""
-            
-            messages = [{"content": prompt, "role": "user"}]
-            response = completion(model=text_model, messages=messages)
-            summary = response.choices[0].message.content if response.choices else "Summary generation failed."
-            
-            return {
-                'type': 'github',
-                'url': url,
-                'content': summary,
-                'stats': stats
-            }
-                
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error processing GitHub content: {str(e)}")
-            return None
+    def get_github_summary(repo_info: Dict[str, Any], text_model: str = "ollama/llama3.2:3b") -> str:
+        """Get summary of GitHub repo content using LLM."""
+        # repo_info expected keys: url, about, readme_text, stats (dict with stars, forks, watchers)
+        if not repo_info: return "No GitHub info provided."
+
+        content_for_summary = f"""
+Repository URL: {repo_info.get('url', 'N/A')}
+About: {repo_info.get('about', 'N/A')}
+
+README/Content Snippet:
+\"\"\"
+{repo_info.get('readme_text', 'N/A')[:2000]}...
+\"\"\"
+
+Repository Statistics:
+- Stars: {repo_info.get('stats', {}).get('stars', 'N/A')}
+- Forks: {repo_info.get('stats', {}).get('forks', 'N/A')}
+- Watchers: {repo_info.get('stats', {}).get('watchers', 'N/A')}
+"""
+        # Truncate for LLM
+        max_chars = 14000
+        if len(content_for_summary) > max_chars:
+             content_for_summary = content_for_summary[:max_chars] + "..."
+             logger.debug("Truncated GitHub combined info for summarization.")
+
+
+        prompt = f"""Please provide a concise summary (around 100 words) of this GitHub project based on the provided information. Focus on its purpose, key features (if mentioned), and target audience. Ignore GitHub interface elements.
+
+Repository Information:
+\"\"\"
+{content_for_summary}
+\"\"\"
+
+Summary:"""
+        return URLScraper._call_llm_completion(prompt, text_model, max_tokens=150)
 
     @staticmethod
-    def process_twitter_content(page, url: str, vision_model: str = "ollama/llava:13b"):
-        """Process Twitter/X content using both screenshot analysis and HTML parsing."""
-        try:
-            # Wait for tweet to load
-            tweet_selector = 'article[data-testid="tweet"]'
-            page.wait_for_selector(tweet_selector, timeout=10000)
-            
-            # Get the HTML content first
-            tweet_element = page.query_selector(tweet_selector)
-            html_content = tweet_element.inner_html()
-            
-            # Extract text, URLs, and metadata from HTML
-            tweet_text = TwitterProcessor.extract_tweet_text(html_content)
-            urls = TwitterProcessor.extract_urls_from_html(html_content)
-            metadata = TwitterProcessor.extract_metadata(html_content)
-            
-            # Take screenshot for vision model analysis
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                tweet_element.screenshot(path=tmp.name)
-                with open(tmp.name, "rb") as image_file:
-                    base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-                os.unlink(tmp.name)
-                
-                # Use the configured vision model for analysis
-                response = completion(
-                    model=vision_model, 
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": f"Please analyze this tweet. The tweet content is: {tweet_text}. Provide: 1) Main topic/subject, 2) Any media content description if mentioned, 3) Notable engagement metrics if visible, 4) Any hashtags or key mentions"},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{base64_image}"
-                                    }
-                                }
-                            ]
-                        }
-                    ],
-                    stream=False
-                )
-                vision_analysis = response.choices[0].message.content if response.choices else None
+    def get_youtube_summary(details: Dict[str, Any], content_type: str, text_model: str) -> str:
+        """Generate a summary string for YouTube content."""
+        if not details: return "Could not retrieve YouTube details."
 
-                # Combine all information into a comprehensive summary
-                content_parts = []
-                
-                # Add metadata if available
-                if metadata.get('author'):
-                    author_info = metadata['author']
-                    content_parts.append(f"Author: {author_info.get('name')} ({author_info.get('handle')})")
-                
-                if metadata.get('timestamp'):
-                    content_parts.append(f"Posted: {metadata['timestamp']}")
-                
-                # Add the original tweet text
-                if tweet_text:
-                    content_parts.append(f"\nTweet text:\n{tweet_text}")
-                
-                # Add model analysis
-                if vision_analysis:
-                    content_parts.append(f"\nAnalysis:\n{vision_analysis}")
-                
-                # Add external links
-                if urls:
-                    content_parts.append("\nExternal links:")
-                    for url in urls:
-                        content_parts.append(f"- {url}")
-                
-                # Combine all parts into a single content string
-                combined_content = "\n".join(content_parts)
+        if content_type == 'video':
+             # Limit description length for summary prompt
+             description_snippet = (details.get('description', '')[:500] + '...') if len(details.get('description', '')) > 500 else details.get('description', '')
+             summary_text = (
+                 f"YouTube Video: \"{details.get('title', 'N/A')}\"\n"
+                 f"Channel: {details.get('channel_title', 'N/A')}\n"
+                 f"Views: {details.get('view_count', 'N/A')}, Likes: {details.get('like_count', 'N/A')}\n"
+                 f"Published: {details.get('published_at', '')}\n"
+                 f"Description Snippet: {description_snippet}"
+             )
+             # Optional: Could feed this to an LLM for a more narrative summary
+             return summary_text
+        elif content_type == 'playlist':
+             description_snippet = (details.get('description', '')[:500] + '...') if len(details.get('description', '')) > 500 else details.get('description', '')
+             video_titles = [f"- \"{v['title']}\"" for v in details.get('videos_preview', [])[:5]] # Preview first 5 videos
+             summary_text = (
+                 f"YouTube Playlist: \"{details.get('title', 'N/A')}\"\n"
+                 f"Channel: {details.get('channel_title', 'N/A')}\n"
+                 f"Total Videos: {details.get('item_count', 'N/A')}\n"
+                 f"Published: {details.get('published_at', '')}\n"
+                 f"Description Snippet: {description_snippet}\n"
+                 f"Video Preview:\n" + "\n".join(video_titles)
+             )
+             return summary_text
+        else:
+             return "Unknown YouTube content type."
 
-                return {
-                    'type': 'twitter',
-                    'url': url,
-                    'content': combined_content
-                }
-                    
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error processing Twitter content: {str(e)}")
-            return None
-    
-    @staticmethod
-    def process_youtube_content(url: str, youtube_processor: YouTubeProcessor) -> Optional[Dict[str, Any]]:
-        """Process YouTube video or playlist content."""
-        # Check for video ID first
-        video_id = youtube_processor.extract_video_id(url)
-        if video_id:
-            video_details = youtube_processor.get_video_details(video_id)
-            if video_details:
-                return {
-                    'type': 'youtube',
-                    'url': url,
-                    'content': f"{video_details['content']['title']} | {video_details['content']['description']}"
-                }
-        
-        # Check for playlist ID
-        playlist_id = youtube_processor.extract_playlist_id(url)
-        if playlist_id:
-            playlist_details = youtube_processor.get_playlist_details(playlist_id)
-            if playlist_details:
-                return {
-                    'type': 'youtube',
-                    'url': url,
-                    'content': f"{playlist_details['content']['title']} | {playlist_details['content']['description']}"
-                }
-        
-        return None
-    
+    # --- Keep Pandoc extraction ---
     @staticmethod
     def extract_content_with_pandoc(html: str) -> str:
         """Extract text content from HTML using Pandoc."""
+        if not html: return ""
+        logger.debug("Extracting content using Pandoc...")
         try:
-            # Create a temporary file for the HTML content
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as tmp:
-                tmp.write(html)
-                tmp_path = tmp.name
+            # Use text input directly if possible, avoiding temp file for performance
+            text = pypandoc.convert_text(
+                html,
+                'plain',
+                format='html',
+                extra_args=['--wrap=none', '--strip-comments', '--reference-links'] # reference-links might help clean link clutter
+            )
+            # Basic cleaning
+            text = re.sub(r'\n{3,}', '\n\n', text) # Collapse excessive newlines
+            text = re.sub(r' {2,}', ' ', text) # Collapse multiple spaces
+            text = text.strip()
+            logger.debug(f"Pandoc extracted {len(text)} characters.")
+            return text
 
-            try:
-                # Convert HTML to plain text using Pandoc
-                text = pypandoc.convert_file(
-                    tmp_path,
-                    'plain',
-                    format='html',
-                    extra_args=['--wrap=none', '--strip-comments']
-                )
-                
-                # Clean up the text
-                text = re.sub(r'\s+', ' ', text).strip()
-                return text
-            
-            finally:
-                # Clean up temporary file
-                os.unlink(tmp_path)
-                
+        except OSError as e:
+             # Handle common Pandoc not found error
+             if "No such file" in str(e) or "cannot find" in str(e).lower():
+                  logger.error("Pandoc command not found. Please ensure Pandoc is installed and in your system's PATH.")
+                  return "[Error: Pandoc not installed or not found in PATH]"
+             else:
+                  logger.error(f"Pandoc OS Error: {e}")
+                  return f"[Error: Pandoc execution failed ({e})]"
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error converting HTML with Pandoc: {str(e)}")
-            return ""
+            logger.error(f"Error converting HTML with Pandoc: {str(e)}")
+            return f"[Error: Pandoc conversion failed ({e})]"
 
+    # --- Keep Google Search fallback ---
     @staticmethod
     def get_url_info_from_search(url: str) -> Optional[str]:
         """Get information about a URL using Google Custom Search API."""
-        try:
-            # Get API credentials from environment
-            api_key = os.getenv('GOOGLE_SEARCH_API_KEY')
-            cx = os.getenv('SEARCH_ENGINE_ID')  # Custom Search Engine ID
-            
-            if not api_key or not cx:
-                print("[{datetime.now().strftime('%H:%M:%S')}] Google API credentials not configured")
-                return None
-            
-            # Initialize the Custom Search API service
-            service = build("customsearch", "v1", developerKey=api_key)
-            
-            # Extract domain for better search results
-            domain = urlparse(url).netloc
-            
-            # Perform the search
-            query = f"site:{domain} {url}"  # Search for content from this specific URL and domain
-            result = service.cse().list(q=query, cx=cx, num=5).execute()
-            
-            if 'items' not in result:
-                return None
-                
-            # Collect relevant information from search results
-            search_info = []
-            
-            # Try to get description of the exact URL
-            exact_match = next((item for item in result['items'] 
-                              if item['link'].startswith(url)), None)
-            
-            if exact_match and 'snippet' in exact_match:
-                search_info.append(f"Page description: {exact_match['snippet']}")
-            
-            # Get site description if available
-            site_info = next((item for item in result['items'] 
-                            if item['link'].startswith(f"https://{domain}")), None)
-                            
-            if site_info and 'snippet' in site_info:
-                search_info.append(f"Site information: {site_info['snippet']}")
-            
-            # Combine the information
-            if search_info:
-                return " | ".join(search_info)
-            return None
-            
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting search results: {str(e)}")
+        logger.debug(f"Attempting fallback search for URL: {url}")
+        api_key = os.getenv('GOOGLE_SEARCH_API_KEY')
+        cx = os.getenv('GOOGLE_SEARCH_ENGINE_ID')
+
+        if not api_key or not cx:
+            logger.warning("Google Search API credentials (GOOGLE_SEARCH_API_KEY, GOOGLE_SEARCH_ENGINE_ID) not configured. Skipping search fallback.")
             return None
 
-    # Filter function for console messages
+        try:
+            service = build("customsearch", "v1", developerKey=api_key)
+            # Search specifically for the URL
+            query = f'"{url}"' # Exact URL search
+            result = service.cse().list(q=query, cx=cx, num=1).execute() # Fetch only top result
+
+            if 'items' in result and result['items']:
+                item = result['items'][0]
+                title = item.get('title')
+                snippet = item.get('snippet')
+                info = []
+                if title: info.append(f"Title: {title}")
+                if snippet: info.append(f"Description: {snippet.replace('...', '').strip()}") # Clean snippet
+
+                if info:
+                    logger.info(f"Found info via Google Search for {url}")
+                    return " | ".join(info)
+                else:
+                    logger.info(f"Google Search returned result for {url}, but no usable title/snippet.")
+            else:
+                 logger.info(f"Google Search found no results for {url}.")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error performing Google Search for {url}: {str(e)}")
+            return None
+
+    # --- Console message filter (keep as is) ---
     @staticmethod
     def filter_console_message(msg):
-        """Filter function for console messages - returns True for messages to be printed."""
-        # Ignore common resource load failures and network errors
+        # ... (keep the existing implementation) ...
         ignore_patterns = [
-            "Failed to load resource",
-            "net::ERR_",
-            "status of 403",
-            "status of 404",
-            "status of 429"
+            "Failed to load resource", "net::ERR_", "status of 403",
+            "status of 404", "status of 429", "favicon.ico"
         ]
-        
-        msg_text = msg.text.lower()
-        
-        # Skip resource loading errors
-        if any(pattern.lower() in msg_text for pattern in ignore_patterns):
-            return False
-            
-        # Only log severe errors or explicit log messages
-        if msg.type == "error":
-            # Skip resource errors but keep JavaScript errors
-            if "failed to load resource" not in msg_text:
-                return True
-            return False
-        elif msg.type in ["warning", "info"]:
-            # Only show warnings or info if they're not about resource loading
-            return not any(pattern.lower() in msg_text for pattern in ignore_patterns)
-        
-        # Allow other message types (like log) through by default
-        return True
+        msg_text = msg.text().lower() if hasattr(msg, 'text') else ''
+        msg_type = msg.type().lower() if hasattr(msg, 'type') else ''
 
-    @staticmethod 
-    def scrape_url(url: str, text_model: str = "ollama/llama3.2:3b", vision_model: str = "ollama/llava:13b", selectors: Dict[str, str] = None) -> Optional[Dict[str, Any]]:
-        """Extended scrape_url method with session support for Twitter/X.com."""
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] → Starting to scrape URL: {url}")
-        
-        if not URLScraper.is_valid_url(url):
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid URL: {url}")
+        if any(pattern.lower() in msg_text for pattern in ignore_patterns):
+            return False # Silence common errors
+
+        # Silence specific noisy warnings (add more as needed)
+        if "Duplicate key 'aria-labelledby'" in msg.text(): return False
+        if "DevTools failed to load source map" in msg.text(): return False
+
+        # Log important types, filter others
+        if msg_type in ["error", "warning"]:
+             # Log JS errors and non-resource warnings
+             if "failed to load resource" not in msg_text:
+                  return True # Log it
+             return False # Silence resource load errors/warnings
+        elif msg_type == "log":
+            # Decide if general logs are needed (can be very noisy)
+            return False # Silence general console.log messages by default
+        else:
+            return True # Log other types like 'info', 'debug' if they occur
+
+
+    # --- NEW process_twitter_content method ---
+    @staticmethod
+    def process_twitter_content(
+        url: str,
+        session_manager: TwitterSessionManager,
+        download_media: bool = False,
+        media_output_dir: str = "./downloads"
+        ) -> Optional[Dict[str, Any]]:
+        """
+        Processes Twitter/X content using the new modular structure.
+        Ensures valid session, extracts page content, optionally fetches API data and downloads media.
+        """
+        logger.info(f"Processing Twitter/X URL: {url}")
+
+        # 1. Ensure Session is Valid
+        if not session_manager.ensure_valid_session():
+            logger.error("Failed to ensure a valid Twitter/X session. Cannot process tweet.")
+            return {
+                'type': 'twitter',
+                'url': url,
+                'error': 'Session validation/refresh failed.',
+                'content': "[Error: Could not authenticate Twitter/X session]"
+            }
+        session_path = session_manager.get_session_path()
+
+        # 2. Extract Content Directly from Page
+        content_extractor = TwitterContentExtractor()
+        page_details = content_extractor.extract_tweet_details_from_page(url, session_path)
+
+        if not page_details or page_details.get('error'):
+            error_msg = page_details.get('error') if page_details else "Failed to extract page details (None returned)"
+            logger.error(f"Failed to extract base tweet details from page: {error_msg}")
+            return {
+                'type': 'twitter',
+                'url': url,
+                'error': f'Page extraction failed: {error_msg}',
+                'content': f"[Error: Could not extract tweet content from page - {error_msg}]"
+            }
+
+        tweet_id = page_details.get('tweet_id')
+        if not tweet_id:
+            logger.error("Could not determine Tweet ID from page details.")
+            return {
+                'type': 'twitter',
+                'url': url,
+                'error': 'Could not determine Tweet ID',
+                'content': "[Error: Could not determine Tweet ID]"
+            }
+
+        # 3. Prepare Result Dictionary (start with page details)
+        result = {
+            'type': 'twitter',
+            'url': url,
+            'tweet_id': tweet_id,
+            'details': page_details, # Contains text, user, time, urls etc.
+            'media_urls': [],
+            'downloaded_media_paths': [],
+            'content': f"Tweet by @{page_details.get('user_handle', 'unknown')}: {page_details.get('text', '[No text content found]')}" # Basic content string
+        }
+
+
+        # 4. Fetch API Data & Media if needed (currently needed for reliable media URLs)
+        #    Decide if API call is always needed or only for downloads. Let's call for media URLs always for now.
+        media_items = None
+        try:
+             api_client = TwitterAPIClient(session_path)
+             api_data = api_client.fetch_tweet_data_api(tweet_id)
+             if api_data:
+                  media_items = api_client.extract_media_urls_from_api_data(api_data)
+                  if media_items:
+                       result['media_urls'] = [item['url'] for item in media_items]
+                       logger.info(f"Found {len(media_items)} media items via API.")
+                  else:
+                       logger.info("No media items found via API.")
+             else:
+                  logger.warning("Failed to fetch API data for tweet. Media information might be incomplete.")
+                  result['error'] = result.get('error', '') + '; API data fetch failed'
+
+        except Exception as api_e:
+             logger.error(f"Error during API fetch or media extraction: {api_e}")
+             result['error'] = result.get('error', '') + f'; API processing error: {api_e}'
+
+
+        # 5. Download Media if Requested and Available
+        if download_media and media_items:
+            logger.info("Media download requested, proceeding with download...")
+            try:
+                 downloader = TwitterMediaDownloader(output_dir=media_output_dir)
+                 downloaded_files_info = downloader.download_media_items(media_items, page_details, tweet_id)
+                 result['downloaded_media_paths'] = [f['path'] for f in downloaded_files_info]
+                 if result['downloaded_media_paths']:
+                      # Append download info to the main content string
+                      result['content'] += f"\n[Downloaded {len(result['downloaded_media_paths'])} media file(s)]"
+            except Exception as dl_e:
+                 logger.error(f"Error during media download process: {dl_e}")
+                 result['error'] = result.get('error', '') + f'; Media download error: {dl_e}'
+        elif download_media and not media_items:
+             logger.info("Media download requested, but no media items were found via API.")
+
+
+        # 6. Finalize Content String (Could add more details here if needed)
+        # The basic content string is already set. Could enhance with media counts etc.
+        if result['media_urls']:
+             result['content'] += f"\n[Media detected: {len(result['media_urls'])} item(s)]"
+
+
+        logger.info(f"✓ Successfully processed Twitter URL: {url}")
+        return result
+
+
+    # --- Updated scrape_url Method ---
+    @staticmethod
+    def scrape_url(
+        url: str,
+        text_model: str = "ollama/llama3.2:3b",
+        vision_model: str = "ollama/llava:7b", # Keep vision model for non-specialized cases
+        download_media: bool = False, # Flag for media download (esp. Twitter)
+        media_output_dir: str = "./downloads",
+        use_search_fallback: bool = True # Control search fallback
+        ) -> Optional[Dict[str, Any]]:
+        """
+        Scrapes a given URL, handling different content types and using LLMs for summarization.
+        Integrates specialized processing for Twitter, YouTube, GitHub, PDFs.
+        """
+        logger.info(f"Processing URL: {url} (TextModel: {text_model}, VisionModel: {vision_model}, DownloadMedia: {download_media})")
+
+        cleaned_url = URLScraper.clean_url(url)
+        if not URLScraper.is_valid_url(cleaned_url):
+            logger.error(f"Invalid URL after cleaning: {cleaned_url} (Original: {url})")
             return None
-            
-        # Check for special URL types (YouTube, PDF, etc.)
-        if URLScraper.is_youtube_url(url):
+
+        result = {'url': cleaned_url, 'type': 'unknown', 'content': None, 'error': None}
+
+        # --- Handle Special URL Types First ---
+        if URLScraper.is_twitter_url(cleaned_url):
+            session_manager = TwitterSessionManager() # Initialize session manager
+            # Pass download flag and output dir
+            twitter_result = URLScraper.process_twitter_content(
+                cleaned_url,
+                session_manager,
+                download_media=download_media,
+                media_output_dir=media_output_dir
+                )
+            return twitter_result # Return directly, process_twitter_content handles format
+
+        elif URLScraper.is_youtube_url(cleaned_url):
+            result['type'] = 'youtube'
             youtube_api_key = os.getenv('YOUTUBE_DATA_API_KEY')
             if not youtube_api_key:
-                print("YOUTUBE_DATA_API_KEY environment variable is not set")
-                return None
-            youtube_processor = YouTubeProcessor(youtube_api_key)
-            return URLScraper.process_youtube_content(url, youtube_processor)
+                logger.error("YOUTUBE_DATA_API_KEY not set. Cannot process YouTube URL.")
+                result['error'] = 'YouTube API key missing'
+                result['content'] = "[Error: YouTube API key not configured]"
+            else:
+                processor = YouTubeProcessor(youtube_api_key)
+                video_id = processor.extract_video_id(cleaned_url)
+                playlist_id = processor.extract_playlist_id(cleaned_url)
 
-        if URLScraper.is_pdf_url(url):
-            url = re.sub(r'#.*', '', url)
-            return URLScraper.process_pdf_content(url, text_model=text_model)
-            
+                if video_id:
+                    details = processor.get_video_details(video_id)
+                    result['content'] = URLScraper.get_youtube_summary(details, 'video', text_model)
+                elif playlist_id:
+                    details = processor.get_playlist_details(playlist_id)
+                    result['content'] = URLScraper.get_youtube_summary(details, 'playlist', text_model)
+                else:
+                    result['error'] = "Could not extract YouTube video or playlist ID."
+                    result['content'] = "[Error: Invalid YouTube URL format]"
+            return result
+
+        elif URLScraper.is_pdf_url(cleaned_url):
+            result['type'] = 'pdf'
+            pdf_content = URLScraper.download_pdf(cleaned_url)
+            if pdf_content:
+                 pdf_text = URLScraper.extract_pdf_text(pdf_content)
+                 result['content'] = URLScraper.get_pdf_summary(pdf_text, text_model=text_model)
+            else:
+                 result['error'] = 'Failed to download or process PDF'
+                 result['content'] = "[Error: Failed to download or extract PDF content]"
+            return result
+
+        # --- Generic Webpage Processing (including GitHub) ---
+        # Uses Playwright -> Pandoc -> LLM Summary / Search Fallback
         try:
             with sync_playwright() as p:
-                # Launch browser with specific arguments
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=[
-                        '--disable-gpu',
-                        '--disable-dev-shm-usage',
-                        '--disable-setuid-sandbox',
-                        '--no-sandbox',
-                    ]
+                browser = p.chromium.launch(headless=True, args=[ # Standard args
+                    '--disable-gpu', '--disable-dev-shm-usage', '--disable-setuid-sandbox', '--no-sandbox'
+                    ])
+                context = browser.new_context(
+                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                     java_script_enabled=True, # Keep JS enabled for rendering, block resources instead
+                     # Block images/media/fonts for faster loading by default
+                     # Note: This was handled per-page before, context level is simpler
                 )
-                
-                # Determine if we should use session data for Twitter/X.com
-                is_twitter_url = URLScraper.is_twitter_url(url) or 'x.com' in url.lower() or 'twitter.com' in url.lower()
-                
-                # Configure context with resource handling and session data if applicable
-                context_options = {
-                    'viewport': {'width': 1280, 'height': 800},
-                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    # Reduce memory usage
-                    'device_scale_factor': 1,
-                    # Disable features that might slow down loading
-                    'is_mobile': False,
-                    'has_touch': False
-                }
-                
-                # Load session data for Twitter/X.com if available
-                session_data_path = "session-data/session.json"
-                if is_twitter_url and os.path.exists(session_data_path):
-                    try:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Loading Twitter/X.com session data")
-                        with open(session_data_path, 'r') as f:
-                            session_data = json.load(f)
-                        context_options['storage_state'] = session_data
-                    except Exception as e:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error loading session data: {str(e)}")
-                
-                context = browser.new_context(**context_options)
+                # Route to block resources at context level
+                context.route("**/*", lambda route: route.abort() if route.request.resource_type in ['image', 'stylesheet', 'font', 'media'] else route.continue_())
+
                 page = context.new_page()
-                
-                # Set up request interception to block non-essential resources
-                # For Twitter/X.com, we need styles and images for proper rendering
-                if is_twitter_url:
-                    page.route("**/*", lambda route: route.abort() 
-                        if route.request.resource_type in ['font', 'media'] 
-                        else route.continue_())
-                else:
-                    page.route("**/*", lambda route: route.abort() 
-                        if route.request.resource_type in ['image', 'stylesheet', 'font', 'media'] 
-                        else route.continue_())
-                
-                # Configure page for optimal loading
-                page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-                
-                # Set up filtered console logging to suppress unwanted messages
-                def handle_console(msg):
-                    if URLScraper.filter_console_message(msg):
-                        print(f"Console {msg.type}: {msg.text}")
-                
-                # Only log page errors, not console messages
-                page.on("pageerror", lambda err: print(f"Page JavaScript error: {err}"))
-                
-                # Use our custom filter for console messages
-                page.on("console", handle_console)
-                
+                 # Setup console/error logging
+                page.on("pageerror", lambda err: logger.warning(f"Page JS error ({cleaned_url}): {err}"))
+                page.on("console", lambda msg: print(f"Console [{msg.type()}]: {msg.text()}") if URLScraper.filter_console_message(msg) else None) # Conditional print
+
+                extraction_method = "unknown"
                 try:
-                    # Use a longer timeout for Twitter/X.com pages since they might need more time to load with auth
-                    timeout = 30000 if is_twitter_url else 20000
-                    page.goto(url, wait_until='domcontentloaded', timeout=timeout)
-                except PlaywrightTimeout:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Page failed to load: {url}")
-                    print("Attempting to get information from search...")
-                    
-                    # Try to get information about the URL from search
-                    search_info = URLScraper.get_url_info_from_search(url)
-                    if search_info:
-                        result = {
-                            'type': 'webpage',
-                            'url': url,
-                            'content': search_info,
-                            'extraction_method': 'web_search'
-                        }
-                        return result
-                    return None
-                
-                # Process based on URL type
-                if is_twitter_url:
-                    # Wait a bit longer for Twitter/X.com to load properly with the authenticated session
-                    page.wait_for_timeout(5000)
-                    
-                    # Check if we're logged in by looking for specific elements
-                    is_logged_in = page.query_selector('a[aria-label="Profile"]') is not None
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Twitter/X.com login status: {'Logged in' if is_logged_in else 'Not logged in'}")
-                    
-                    result = URLScraper.process_twitter_content(page, url, vision_model=vision_model)
-                elif URLScraper.is_github_repo_url(url):
-                    result = URLScraper.process_github_content(page, url, text_model=text_model)
-                else:
-                    # Try Pandoc extraction first
-                    try:
-                        if selectors:
-                            result = {}
-                            for name, selector in selectors.items():
-                                elements = page.query_selector_all(selector)
-                                texts = []
-                                for el in elements:
-                                    html = el.evaluate('el => el.outerHTML')
-                                    if html:
-                                        text = URLScraper.extract_content_with_pandoc(html)
-                                        if text and text.strip():
-                                            texts.append(text.strip())
-                                result[name] = texts
-                        else:
-                            html = page.content()
-                            text_content = URLScraper.extract_content_with_pandoc(html)
-                            
-                            if not text_content or len(text_content.strip()) < 100:  # Check if content extraction failed or returned minimal content
-                                print(f"[{datetime.now().strftime('%H:%M:%S')}] Pandoc extraction failed or returned minimal content. Falling back to web search.")
-                                
-                                # Fallback to web search
-                                search_info = URLScraper.get_url_info_from_search(url)
-                                if search_info:
-                                    result = {
-                                        'type': 'webpage',
-                                        'url': url,
-                                        'content': search_info,
-                                        'extraction_method': 'web_search'
-                                    }
-                                else:
-                                    result = None
-                            else:
-                                summary = URLScraper.get_webpage_summary(text_content, text_model=text_model)
-                                result = {
-                                    'type': 'webpage',
-                                    'url': url,
-                                    'content': summary,
-                                    'extraction_method': 'pandoc'
-                                }
-                    
-                    except Exception as e:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error with Pandoc extraction, falling back to web search: {str(e)}")
-                        # Fallback to web search
-                        search_info = URLScraper.get_url_info_from_search(url)
-                        if search_info:
-                            result = {
-                                'type': 'webpage',
-                                'url': url,
-                                'content': search_info,
-                                'extraction_method': 'web_search'
-                            }
-                        else:
-                            result = None
-                
-                browser.close()
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Successfully scraped URL: {url}")
-                return result
-                
+                    logger.debug(f"Navigating to generic URL: {cleaned_url}")
+                    page.goto(cleaned_url, wait_until='domcontentloaded', timeout=30000) # Allow 30s for load
+                    # Add small wait for any dynamic content rendering after DOM load
+                    page.wait_for_timeout(2000)
+
+                    # Check if it's GitHub after navigation (in case of redirects)
+                    final_url = page.url
+                    if URLScraper.is_github_repo_url(final_url):
+                         result['type'] = 'github'
+                         extraction_method = 'github_playwright'
+                         logger.info("Processing as GitHub URL...")
+                         # Simplified GitHub Extraction: Get Readme/About, Generate Summary
+                         repo_info = {'url': final_url, 'about': '', 'readme_text': '', 'stats': {}}
+                         try:
+                              # Extract "About"
+                              about_el = page.query_selector('.BorderGrid--spacious .f4.my-3') # Updated selector? Inspect needed.
+                              if about_el: repo_info['about'] = about_el.text_content().strip()
+
+                              # Extract README (common selector)
+                              readme_el = page.query_selector('#readme article.markdown-body')
+                              if readme_el: repo_info['readme_text'] = readme_el.text_content().strip()
+
+                               # Extract Stats (selectors might change)
+                              stars_el = page.query_selector('#repo-stars-counter-star')
+                              forks_el = page.query_selector('#repo-network-counter')
+                              watchers_el = page.query_selector('#repo-watchers-counter')
+                              if stars_el: repo_info['stats']['stars'] = stars_el.get_attribute('title')
+                              if forks_el: repo_info['stats']['forks'] = forks_el.get_attribute('title')
+                              if watchers_el: repo_info['stats']['watchers'] = watchers_el.get_attribute('title')
+
+                              result['content'] = URLScraper.get_github_summary(repo_info, text_model)
+                         except PlaywrightError as gh_err:
+                              logger.error(f"Playwright error during GitHub element extraction: {gh_err}")
+                              result['error'] = f"GitHub processing error: {gh_err}"
+                              result['content'] = "[Error: Could not extract GitHub content]"
+
+                    else:
+                         # Generic Webpage: Try Pandoc -> LLM
+                         result['type'] = 'webpage'
+                         logger.info("Processing as generic webpage...")
+                         html_content = page.content()
+                         text_content = URLScraper.extract_content_with_pandoc(html_content)
+
+                         if text_content and not text_content.startswith("[Error:") and len(text_content) > 50: # Basic check for valid content
+                              extraction_method = 'pandoc_llm'
+                              result['content'] = URLScraper.get_webpage_summary(text_content, text_model)
+                         else:
+                              logger.warning(f"Pandoc extraction yielded minimal or error content ({len(text_content)} chars). Error: {text_content if text_content.startswith('[Error:') else 'None'}")
+                              result['error'] = "Pandoc extraction failed or insufficient content."
+                              # Trigger search fallback if enabled
+                              if use_search_fallback:
+                                   logger.info("Attempting Google Search fallback...")
+                                   search_content = URLScraper.get_url_info_from_search(cleaned_url)
+                                   if search_content:
+                                        result['content'] = search_content
+                                        extraction_method = 'google_search'
+                                        result['error'] = None # Clear previous error if search succeeded
+                                   else:
+                                        result['content'] = "[Error: Content extraction failed, and search fallback yielded no results]"
+                              else:
+                                   result['content'] = "[Error: Content extraction failed, search fallback disabled]"
+
+
+                except PlaywrightTimeout as e:
+                    logger.error(f"Timeout loading page: {cleaned_url} - {e}")
+                    result['error'] = f"Page load timeout: {e}"
+                    # Trigger search fallback if enabled
+                    if use_search_fallback:
+                         logger.info("Attempting Google Search fallback due to timeout...")
+                         search_content = URLScraper.get_url_info_from_search(cleaned_url)
+                         if search_content:
+                              result['content'] = search_content
+                              extraction_method = 'google_search'
+                              result['error'] = None # Clear timeout error if search succeeded
+                         else:
+                              result['content'] = "[Error: Page load timed out, and search fallback yielded no results]"
+                    else:
+                         result['content'] = "[Error: Page load timed out, search fallback disabled]"
+
+                except PlaywrightError as e:
+                     logger.error(f"Playwright error processing {cleaned_url}: {e}")
+                     result['error'] = f"Playwright error: {e}"
+                     result['content'] = f"[Error: Playwright failed - {e}]" # Keep specific error if possible
+
+                except Exception as e:
+                     logger.error(f"Unexpected error during Playwright processing of {cleaned_url}: {e}", exc_info=True)
+                     result['error'] = f"Unexpected Playwright error: {e}"
+                     result['content'] = "[Error: Unexpected failure during scraping]"
+
+                finally:
+                     result['extraction_method'] = extraction_method # Record how content was obtained
+                     page.close()
+                     context.close()
+                     browser.close()
+
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error scraping {url}:")
-            print(f"├── Error type: {type(e).__name__}")
-            print(f"└── Details: {str(e)}")
-            return None
+            logger.error(f"General error setting up Playwright for {cleaned_url}: {e}", exc_info=True)
+            result['error'] = f"Playwright setup failed: {e}"
+            result['content'] = "[Error: Scraper setup failed]"
+
+
+        # Final check for content
+        if result['content'] is None and result['error'] is None:
+             logger.warning(f"Processing finished for {cleaned_url}, but no content was generated and no error reported.")
+             result['content'] = "[Error: Unknown processing failure - no content extracted]"
+        elif result.get('error'):
+             logger.error(f"Finished processing {cleaned_url} with error: {result['error']}")
+        else:
+             logger.info(f"✓ Finished processing {cleaned_url} (Type: {result['type']}, Method: {result.get('extraction_method', 'N/A')})")
+
+
+        return result
