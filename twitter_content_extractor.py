@@ -39,6 +39,45 @@ class TwitterContentExtractor:
         }
 
         try:
+            # First try JavaScript approach similar to original script for better text extraction
+            try:
+                # This is similar to the original script's approach
+                tweet_text = page.evaluate('''() => {
+                    const elements = document.querySelectorAll('[data-testid="tweetText"] > span');
+                    let text = '';
+                    for (const element of elements) {
+                        text += element.textContent + ' ';
+                    }
+                    return text.trim();
+                }''')
+                
+                if tweet_text:
+                    details['text'] = tweet_text
+                    
+                # Also extract URLs using JavaScript as in original
+                urls = page.evaluate('''() => {
+                    const links = document.querySelectorAll('[data-testid="tweetText"] a[href]');
+                    const urls = [];
+                    for (const link of links) {
+                        const href = link.getAttribute('href');
+                        if (href && !href.startsWith('/hashtag/') && !href.startsWith('/@')) {
+                            if (href.includes('t.co')) {
+                                const expandedUrl = link.getAttribute('title') || href;
+                                urls.push(expandedUrl);
+                            } else {
+                                urls.push(href);
+                            }
+                        }
+                    }
+                    return urls;
+                }''')
+                
+                if urls:
+                    details['embedded_urls'] = urls
+            except Exception as js_e:
+                logger.warning(f"JavaScript extraction failed, falling back to BeautifulSoup: {js_e}")
+                # Continue to BeautifulSoup approach as fallback
+            
             # Ensure the main tweet article exists
             main_tweet_selector = 'article[data-testid="tweet"]'
             page.wait_for_selector(main_tweet_selector, state='visible', timeout=15000)
@@ -82,59 +121,57 @@ class TwitterContentExtractor:
                     logger.warning(f"Could not parse timestamp: {details['created_at_iso']}")
                     details['timestamp_ms'] = int(time.time() * 1000) # Fallback to current time
 
-            # --- Tweet Text & Embedded Entities ---
-            tweet_text_div = tweet_article.find('div', attrs={'data-testid': 'tweetText'})
-            if tweet_text_div:
-                text_parts = []
-                processed_urls = set() # Avoid duplicates from t.co and title attr
+            # --- Tweet Text & Embedded Entities (if JS approach failed) ---
+            if not details['text']:
+                tweet_text_div = tweet_article.find('div', attrs={'data-testid': 'tweetText'})
+                if tweet_text_div:
+                    text_parts = []
+                    processed_urls = set() # Avoid duplicates from t.co and title attr
 
-                for element in tweet_text_div.children: # Iterate direct children
-                    if element.name == 'span': # Regular text parts
-                         text_parts.append(element.get_text())
-                    elif element.name == 'a': # Links (URLs, Hashtags, Mentions)
-                        href = element.get('href', '')
-                        link_text = element.get_text(strip=True)
-                        text_parts.append(link_text) # Include link text in main text flow
+                    for element in tweet_text_div.descendants:  # Use descendants instead of children to get nested elements
+                        if element.name == 'span' and not element.find_parent('a'):  # Regular text parts not inside links
+                             text_parts.append(element.get_text())
+                        elif element.name == 'a': # Links (URLs, Hashtags, Mentions)
+                            href = element.get('href', '')
+                            link_text = element.get_text(strip=True)
+                            text_parts.append(link_text) # Include link text in main text flow
 
-                        if href.startswith('/hashtag/'):
-                            details['hashtags'].append(link_text.lstrip('#'))
-                        elif href.startswith('/') and '@' in link_text: # Basic mention check
-                            details['mentions'].append(link_text.lstrip('@'))
-                        elif href.startswith('http'):
-                            # Handle t.co links and try to get expanded URL from title or text
-                            if 't.co' in href:
-                                expanded_url = element.get('title') or element.get_text(strip=True)
-                                if expanded_url and expanded_url.startswith('http') and expanded_url not in processed_urls:
-                                     details['embedded_urls'].append(expanded_url)
-                                     processed_urls.add(expanded_url)
-                                elif href not in processed_urls: # Fallback to t.co if no expansion found
-                                     details['embedded_urls'].append(href)
-                                     processed_urls.add(href)
-                            elif href not in processed_urls:
-                                details['embedded_urls'].append(href)
-                                processed_urls.add(href)
-                    elif element.name == 'img': # Emojis / Alt text
-                         alt_text = element.get('alt')
-                         if alt_text:
-                              text_parts.append(alt_text)
-                    # Add more element types if needed (e.g., divs for polls?)
+                            if href.startswith('/hashtag/'):
+                                details['hashtags'].append(link_text.lstrip('#'))
+                            elif href.startswith('/') and '@' in link_text: # Basic mention check
+                                details['mentions'].append(link_text.lstrip('@'))
+                            elif href.startswith('http'):
+                                # Handle t.co links and try to get expanded URL from title or text
+                                if 't.co' in href:
+                                    expanded_url = element.get('title') or element.get_text(strip=True)
+                                    if expanded_url and expanded_url.startswith('http') and expanded_url not in processed_urls:
+                                         details['embedded_urls'].append(expanded_url)
+                                         processed_urls.add(expanded_url)
+                                    elif href not in processed_urls: # Fallback to t.co if no expansion found
+                                         details['embedded_urls'].append(href)
+                                         processed_urls.add(href)
+                                elif href not in processed_urls:
+                                    details['embedded_urls'].append(href)
+                                    processed_urls.add(href)
+                        elif element.name == 'img': # Emojis / Alt text
+                             alt_text = element.get('alt')
+                             if alt_text:
+                                  text_parts.append(alt_text)
 
-                # Join text parts, clean up extra whitespace
-                details['text'] = re.sub(r'\s+', ' ', "".join(text_parts)).strip()
+                    # Join text parts, clean up extra whitespace
+                    details['text'] = re.sub(r'\s+', ' ', "".join(text_parts)).strip()
 
-            else:
-                 details['error'] = "Could not find tweet text container."
-                 logger.error(details['error'])
-
+                else:
+                     details['error'] = "Could not find tweet text container."
+                     logger.error(details['error'])
 
             # Clean up potential duplicates
             details['hashtags'] = sorted(list(set(details['hashtags'])))
             details['mentions'] = sorted(list(set(details['mentions'])))
             details['embedded_urls'] = sorted(list(set(details['embedded_urls'])))
 
-
         except Exception as e:
-             details['error'] = f"Error during BS4 parsing: {e}"
+             details['error'] = f"Error during content extraction: {e}"
              logger.error(details['error'])
 
         return details
@@ -191,5 +228,92 @@ class TwitterContentExtractor:
         else:
              logger.error(f"Extraction failed for {url}, details object is None.")
 
-
         return details
+        """
+        Extracts all media URLs (images, GIFs, videos) from the tweet data.
+        Follows exactly the same path traversal as the original script.
+        """
+        logger.info("Extracting media URLs from tweet data")
+        
+        media_items = []
+        
+        try:
+            # Navigate the nested structure to find the tweet information - EXACT same path as original
+            tweet_result = tweet_data['data']['threaded_conversation_with_injections_v2']['instructions'][0]['entries'][0]['content']['itemContent']['tweet_results']['result']
+            
+            # Extract the extended entities which contain media
+            extended_entities = tweet_result.get('legacy', {}).get('extended_entities', {})
+            
+            if not extended_entities or 'media' not in extended_entities:
+                logger.warning("No media found in tweet")
+                return []
+            
+            # Process all media items
+            for index, media in enumerate(extended_entities['media']):
+                media_type = media.get('type', '')
+                media_item = {
+                    'type': media_type,
+                    'index': index,
+                    'url': None,
+                    'extension': None
+                }
+                
+                if media_type == 'photo':
+                    # For photos, use the highest quality version
+                    media_item['url'] = media.get('media_url_https', '')
+                    media_item['extension'] = 'jpg'  # Most Twitter images are JPGs
+                    
+                elif media_type == 'video':
+                    # For videos, find the highest quality MP4
+                    video_info = media.get('video_info', {})
+                    variants = video_info.get('variants', [])
+                    
+                    # Find the highest quality MP4 variant
+                    mp4_variants = [v for v in variants if v.get('content_type') == 'video/mp4']
+                    if mp4_variants:
+                        best_variant = max(mp4_variants, key=lambda v: v.get('bitrate', 0))
+                        media_item['url'] = best_variant['url']
+                        media_item['extension'] = 'mp4'
+                    
+                elif media_type == 'animated_gif':
+                    # For GIFs, get the MP4 version (Twitter converts GIFs to MP4)
+                    video_info = media.get('video_info', {})
+                    variants = video_info.get('variants', [])
+                    
+                    if variants:
+                        # There's usually only one variant for GIFs
+                        media_item['url'] = variants[0]['url']
+                        media_item['extension'] = 'mp4'  # Twitter serves GIFs as MP4s
+                
+                # Add to the list if we found a URL
+                if media_item['url']:
+                    media_items.append(media_item)
+                    logger.info(f"Found {media_type} URL: {media_item['url']}")
+                else:
+                    logger.warning(f"Could not extract URL for {media_type} at index {index}")
+            
+            return media_items
+            
+        except (KeyError, IndexError) as e:
+            logger.error(f"Failed to extract media URLs: {e}")
+            # Log the structure for debugging
+            try:
+                if 'data' in tweet_data and 'threaded_conversation_with_injections_v2' in tweet_data['data']:
+                    instructions = tweet_data['data']['threaded_conversation_with_injections_v2'].get('instructions', [])
+                    if instructions:
+                        logger.debug(f"Instructions count: {len(instructions)}")
+                        if len(instructions) > 0:
+                            entries = instructions[0].get('entries', [])
+                            logger.debug(f"Entries count: {len(entries)}")
+                            if entries and len(entries) > 0:
+                                logger.debug(f"First entry content keys: {entries[0].get('content', {}).keys()}")
+                                item_content = entries[0].get('content', {}).get('itemContent', {})
+                                if item_content:
+                                    logger.debug(f"ItemContent keys: {item_content.keys()}")
+                                    tweet_results = item_content.get('tweet_results', {})
+                                    if tweet_results:
+                                        logger.debug(f"Tweet_results keys: {tweet_results.keys()}")
+            except Exception as debug_e:
+                logger.error(f"Error while debugging structure: {debug_e}")
+            
+            return []  # Return empty list on error

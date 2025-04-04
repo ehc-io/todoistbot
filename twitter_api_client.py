@@ -20,7 +20,7 @@ class TwitterAPIClient:
     def _extract_auth_tokens(self) -> Optional[Tuple[str, str, str]]:
         """
         Uses Playwright to load the session and extract necessary authentication tokens.
-        Assumes the session file is valid.
+        Closely matches the approach from the original extractor script.
         Returns (auth_token, csrf_token, bearer_token) or None if extraction fails.
         """
         if not self.session_path.exists():
@@ -28,156 +28,154 @@ class TwitterAPIClient:
             return None
 
         logger.info("Extracting auth tokens from session using Playwright...")
-        browser = None
-        context = None
-        page = None
         captured_bearer_token = None
         auth_token = None
         csrf_token = None
         bearer_token = None
-        last_intercepted_token = None # To avoid logging duplicates
+        last_token = None  # Track last seen token to avoid duplicates
 
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                # ---> FIX: Ensure context loads storage state correctly <---
+            with sync_playwright() as playwright:
+                # Launch browser with the session state
+                browser = playwright.chromium.launch(headless=True)
                 context = browser.new_context(storage_state=str(self.session_path))
                 page = context.new_page()
+                
+                # Define request handler to capture bearer token
+                def handle_request(request):
+                    nonlocal captured_bearer_token, last_token
+                    
+                    # Look for API requests to Twitter/X endpoints
+                    if ('api.twitter.com' in request.url or 
+                        'twitter.com/i/api' in request.url or 
+                        'x.com/i/api' in request.url):
+                        headers = request.headers
+                        auth_header = headers.get('authorization')
+                        
+                        # Check if this is a Bearer token and not the same as the last one we logged
+                        if auth_header and auth_header.startswith('Bearer '):
+                            token = auth_header.replace('Bearer ', '')
+                            # Only capture if it's a new token
+                            if token != last_token:
+                                captured_bearer_token = token
+                                last_token = token
+                                logger.info(f"Intercepted Bearer token: {token[:20]}...")
+                
+                # Listen to all requests
+                page.on('request', handle_request)
 
-                def handle_request(route: Route):
-                    nonlocal captured_bearer_token, last_intercepted_token
-                    request: Request = route.request
-                    # Don't process headers if token already found
-                    if captured_bearer_token:
-                        try: route.continue_() # Still need to continue
-                        except PlaywrightError as cont_err: logger.debug(f"Error continuing route {request.url} after token found: {cont_err}")
-                        return
+                # Navigate to Twitter/X home page
+                logger.info("Navigating to Twitter/X home page")
+                page.goto("https://x.com/home")
+                
+                # Wait for more API calls to happen
+                logger.info("Waiting for API calls...")
+                page.wait_for_timeout(5000)  # Wait for 5 seconds
 
-                    # ---> FIX: Match extractor's interception logic more closely <---
-                    is_api_call = ('api.twitter.com' in request.url or
-                                   'twitter.com/i/api' in request.url or
-                                   'x.com/i/api' in request.url)
-
-                    if is_api_call:
-                        auth_header = request.headers.get('authorization', '')
-                        if auth_header.startswith('Bearer AAAA'): # Check for the specific bearer token format
-                            token = auth_header.split(' ')[1]
-                            # Only log/capture if it's different from the last one seen
-                            if token != last_intercepted_token:
-                                if not captured_bearer_token: # Capture the first valid one we see
-                                    logger.info(f"Intercepted Bearer token: {token[:20]}...")
-                                    captured_bearer_token = token
-                                last_intercepted_token = token # Update last seen token
-
-                    # Ensure the request continues regardless of interception logic
+                # Extract cookies
+                cookies = context.cookies()
+                
+                # Find auth_token and csrf_token from cookies
+                auth_token = next((cookie["value"] for cookie in cookies if cookie["name"] == "auth_token"), None)
+                csrf_token = next((cookie["value"] for cookie in cookies if cookie["name"] == "ct0"), None)
+                
+                # If we didn't capture a bearer token through request interception, try JS context
+                if not captured_bearer_token:
+                    logger.info("No bearer token captured from requests, trying JavaScript context...")
+                    
+                    # Try to extract bearer token from JavaScript context
                     try:
-                        route.continue_()
-                    except PlaywrightError as cont_err:
-                        logger.debug(f"Error continuing route {request.url}: {cont_err}")
-
-                page.route("**/*", handle_request)
-
-                try:
-                    logger.info("Navigating to x.com/home...")
-                    # Navigate without strict wait_until, then wait for a specific element
-                    page.goto("https://x.com/home", timeout=30000, wait_until="domcontentloaded") # Use domcontentloaded
-
-                    # ---> FIX: Use a more reliable indicator or longer wait after navigation <---
-                    # Instead of just compose button, wait for timeline or increase general wait
-                    logger.info("Waiting after navigation for potential API calls...")
-                    page.wait_for_timeout(5000) # Wait 5 seconds, similar to extractor logic
-
-                    # Optional: Wait for a known element like timeline if needed
-                    # try:
-                    #     timeline_selector = '[data-testid="primaryColumn"]' # Example selector
-                    #     page.wait_for_selector(timeline_selector, timeout=15000)
-                    #     logger.info("Timeline indicator found.")
-                    # except PlaywrightError:
-                    #     logger.warning("Timeline indicator not found within timeout, proceeding anyway.")
-
-
-                    # Now wait specifically for the bearer token if not found yet via interception
-                    start_time = time.time()
-                    wait_token_timeout = 5 # Wait max 5 *additional* seconds for token
-                    while not captured_bearer_token and time.time() - start_time < wait_token_timeout:
-                         logger.debug("Waiting for bearer token capture...")
-                         page.wait_for_timeout(500) # Check every 500ms
-
-                    if not captured_bearer_token:
-                         logger.warning(f"Bearer token not captured via interception after waiting.")
-                         # NOTE: Fallback logic (like JS evaluation from extractor) could be added here if interception remains unreliable.
-                         # For now, we rely on interception working during the initial load + wait.
-
+                        js_bearer_token = page.evaluate('''() => {
+                            // Look in various places where Twitter might store the token
+                            
+                            // Method 1: Look in localStorage
+                            for (let key of Object.keys(localStorage)) {
+                                if (key.includes('token') || key.includes('auth')) {
+                                    let value = localStorage.getItem(key);
+                                    if (value && value.includes('AAAA')) return value;
+                                }
+                            }
+                            
+                            // Method 2: Try to find in main JS objects
+                            try {
+                                if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.authentication) {
+                                    return window.__INITIAL_STATE__.authentication.bearerToken;
+                                }
+                                
+                                for (let key in window) {
+                                    try {
+                                        let obj = window[key];
+                                        if (obj && typeof obj === 'object' && obj.authorization && obj.authorization.bearerToken) {
+                                            return obj.authorization.bearerToken;
+                                        }
+                                    } catch (e) {}
+                                }
+                            } catch (e) {}
+                            
+                            return null;
+                        }''')
+                        
+                        if js_bearer_token:
+                            # Clean up the token if needed
+                            if isinstance(js_bearer_token, str) and js_bearer_token.startswith('Bearer '):
+                                js_bearer_token = js_bearer_token.replace('Bearer ', '')
+                            bearer_token = js_bearer_token
+                            logger.info(f"Found bearer token in JavaScript context")
+                    except Exception as e:
+                        logger.warning(f"Error extracting bearer token from JavaScript context: {e}")
+                else:
+                    # Use the bearer token we captured from request interception
                     bearer_token = captured_bearer_token
-
-                    # Extract cookies
-                    cookies = context.cookies()
-                    auth_token = next((c["value"] for c in cookies if c["name"] == "auth_token"), None)
-                    csrf_token = next((c["value"] for c in cookies if c["name"] == "ct0"), None)
-
-                except PlaywrightError as e:
-                    logger.error(f"Playwright error during token extraction page load/wait: {e}")
-                    # Attempt to capture screenshot on error
-                    try:
-                        screenshot_path = f"playwright_error_{time.strftime('%Y%m%d_%H%M%S')}.png"
-                        page.screenshot(path=screenshot_path, full_page=True)
-                        logger.info(f"Screenshot saved to {screenshot_path} on error.")
-                    except Exception as se:
-                        logger.error(f"Failed to take screenshot on error: {se}")
-
-
+                
+                # Close browser
+                browser.close()
+                
+                if not auth_token or not csrf_token or not bearer_token:
+                    logger.error("Failed to extract all required authentication tokens")
+                    missing = []
+                    if not auth_token: missing.append("auth_token")
+                    if not csrf_token: missing.append("csrf_token")
+                    if not bearer_token: missing.append("bearer_token")
+                    
+                    raise ValueError(f"Missing authentication tokens: {', '.join(missing)}")
+                
+                logger.info("Successfully extracted all authentication tokens")
+                return auth_token, csrf_token, bearer_token
         except Exception as e:
-            logger.error(f"Unexpected error during token extraction setup: {e}", exc_info=True)
-
-        finally:
-            # Graceful cleanup
-            if page:
-                try: page.close()
-                except Exception as e_page: logger.debug(f"Error closing page: {e_page}")
-            if context:
-                try: context.close()
-                except Exception as e_context: logger.debug(f"Error closing context: {e_context}")
-            if browser:
-                try: browser.close()
-                except Exception as e_browser: logger.debug(f"Error closing browser: {e_browser}")
-
-        # Validation logic
-        if not all([auth_token, csrf_token, bearer_token]):
-            missing = [name for name, val in [('auth_token', auth_token), ('csrf_token', csrf_token), ('bearer_token', bearer_token)] if not val]
-            logger.error(f"Failed to extract all required tokens. Missing: {', '.join(missing)}")
-            return None
-
-        logger.info("Successfully extracted auth tokens.")
-        self.auth_tokens = (auth_token, csrf_token, bearer_token) # Store tokens on success
-        return self.auth_tokens
+            logger.error(f"Failed to extract auth tokens: {e}")
+            raise ValueError(f"Failed to extract authentication tokens: {e}")
 
     def _get_tokens(self) -> bool:
         """Ensures auth tokens are loaded."""
         if self.auth_tokens:
             return True
         extracted_tokens = self._extract_auth_tokens()
-        return extracted_tokens is not None
+        if extracted_tokens is not None:
+            self.auth_tokens = extracted_tokens  # FIXED: Store the extracted tokens
+            return True
+        return False
 
     def fetch_tweet_data_api(self, tweet_id: str) -> Optional[Dict[str, Any]]:
         """
         Fetches detailed tweet data using the GraphQL API.
-        Requires valid auth tokens.
+        Exactly matches the parameters from the original working script.
         """
         logger.info(f"Fetching tweet data via API for ID: {tweet_id}")
         if not self._get_tokens():
             logger.error("Cannot fetch tweet data: Auth tokens not available.")
             return None
 
-        # Ensure self.auth_tokens is not None before unpacking
+        # Ensure tokens are available
         if self.auth_tokens is None:
-             logger.error("Auth tokens tuple is None, cannot proceed.")
-             return None
+            logger.error("Auth tokens tuple is None, cannot proceed.")
+            return None
+        
         auth_token, csrf_token, bearer_token = self.auth_tokens
 
-        # API Endpoint (same as extractor)
+        # API Endpoint (same as original script)
         api_url = "https://x.com/i/api/graphql/zJvfJs3gSbrVhC0MKjt_OQ/TweetDetail"
-
-        # --- VVV FIX: Use EXACT parameters/features/toggles from the working extractor script ---
+        
+        # Use EXACTLY the same parameters as the original script
         params = {
             "variables": json.dumps({
                 "focalTweetId": tweet_id,
@@ -187,241 +185,161 @@ class TwitterAPIClient:
                 "withQuickPromoteEligibilityTweetFields": False,
                 "withBirdwatchNotes": False,
                 "withVoice": False,
-                "withV2Timeline": True # Kept from original, seems important and present in extractor
+                "withV2Timeline": True
             }),
-            # Use the features dict from twitter-media-extractor.py
             "features": json.dumps({
-                "rweb_tipjar_consumption_enabled": False, # Aligned with extractor
-                "responsive_web_graphql_exclude_directive_enabled": False, # Aligned with extractor
-                "verified_phone_label_enabled": False, # Aligned with extractor
-                "creator_subscriptions_tweet_preview_api_enabled": False, # Aligned with extractor
-                "responsive_web_graphql_timeline_navigation_enabled": False, # Aligned with extractor
-                "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False, # Aligned with extractor
-                "communities_web_enable_tweet_community_results_fetch": False, # Aligned with extractor
-                "c9s_tweet_anatomy_moderator_badge_enabled": False, # Aligned with extractor
-                "articles_preview_enabled": True, # Aligned with extractor
-                "tweetypie_unmention_optimization_enabled": False, # Aligned with extractor
-                "responsive_web_edit_tweet_api_enabled": False, # Aligned with extractor
-                "graphql_is_translatable_rweb_tweet_is_translatable_enabled": False, # Aligned with extractor
-                "view_counts_everywhere_api_enabled": False, # Aligned with extractor
-                "longform_notetweets_consumption_enabled": False, # Aligned with extractor
-                "responsive_web_twitter_article_tweet_consumption_enabled": False, # Aligned with extractor
-                "tweet_awards_web_tipping_enabled": False, # Aligned with extractor
-                "creator_subscriptions_quote_tweet_preview_enabled": False, # Aligned with extractor
-                "freedom_of_speech_not_reach_fetch_enabled": False, # Aligned with extractor
-                "standardized_nudges_misinfo": False, # Aligned with extractor
-                "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": False, # Aligned with extractor
-                "tweet_with_visibility_results_prefer_gql_media_interstitial_enabled": False, # Aligned with extractor
-                "rweb_video_timestamps_enabled": False, # Aligned with extractor
-                "longform_notetweets_rich_text_read_enabled": False, # Aligned with extractor
-                "longform_notetweets_inline_media_enabled": False, # Aligned with extractor
-                "responsive_web_enhance_cards_enabled": False # Aligned with extractor
+                "rweb_tipjar_consumption_enabled": False,
+                "responsive_web_graphql_exclude_directive_enabled": False,
+                "verified_phone_label_enabled": False,
+                "creator_subscriptions_tweet_preview_api_enabled": False,
+                "responsive_web_graphql_timeline_navigation_enabled": False,
+                "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+                "communities_web_enable_tweet_community_results_fetch": False,
+                "c9s_tweet_anatomy_moderator_badge_enabled": False,
+                "articles_preview_enabled": True,
+                "tweetypie_unmention_optimization_enabled": False,
+                "responsive_web_edit_tweet_api_enabled": False,
+                "graphql_is_translatable_rweb_tweet_is_translatable_enabled": False,
+                "view_counts_everywhere_api_enabled": False,
+                "longform_notetweets_consumption_enabled": False,
+                "responsive_web_twitter_article_tweet_consumption_enabled": False,
+                "tweet_awards_web_tipping_enabled": False,
+                "creator_subscriptions_quote_tweet_preview_enabled": False,
+                "freedom_of_speech_not_reach_fetch_enabled": False,
+                "standardized_nudges_misinfo": False,
+                "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": False,
+                "tweet_with_visibility_results_prefer_gql_media_interstitial_enabled": False,
+                "rweb_video_timestamps_enabled": False,
+                "longform_notetweets_rich_text_read_enabled": False,
+                "longform_notetweets_inline_media_enabled": False,
+                "responsive_web_enhance_cards_enabled": False
             }),
-             # Use the fieldToggles dict from twitter-media-extractor.py
             "fieldToggles": json.dumps({
-                "withArticleRichContentState": False, # Aligned with extractor
-                "withAuxiliaryUserLabels": False # Aligned with extractor
+                "withArticleRichContentState": False,
+                "withAuxiliaryUserLabels": False
             })
         }
-
+        
+        # Use EXACTLY the same headers as the original script
         headers = {
-            # Use headers exactly as in twitter-media-extractor.py
-            "Host": "x.com", # Added from extractor
-            "Cookie": f"auth_token={auth_token}; ct0={csrf_token}", # Crucial cookies
+            "Host": "x.com",
+            "Cookie": f"auth_token={auth_token}; ct0={csrf_token}",
             "X-Twitter-Active-User": "yes",
             "Authorization": f"Bearer {bearer_token}",
             "X-Csrf-Token": csrf_token,
             "X-Twitter-Auth-Type": "OAuth2Session",
-             # Use the User-Agent from the extractor script
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
             "Content-Type": "application/json",
-            "Accept": "*/*",
-            # Removed Referer and X-Client-Uuid as they are not in the extractor's request
+            "Accept": "*/*"
         }
-        # --- ^^^ END FIX ---
-
+        
         try:
-            # Increased timeout slightly
-            response = requests.get(api_url, params=params, headers=headers, timeout=20)
-            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-
+            # Make the API request
+            response = requests.get(api_url, params=params, headers=headers, timeout=15)
+            response.raise_for_status()
+            
             data = response.json()
             logger.info("Successfully fetched tweet data from API.")
-
-            # Basic validation of response structure
-            # ---> FIX: Adapt validation based on the expected structure from extractor's features <---
+            
+            # Basic validation of expected structure
             if 'data' not in data or 'threaded_conversation_with_injections_v2' not in data['data']:
-                 logger.warning("API response structure might have changed or differs from expectation. Expected keys ('data', 'threaded_conversation_with_injections_v2') not found directly.")
-                 # Log more details for debugging if structure is unexpected
-                 logger.debug(f"API Response keys: {list(data.keys())}")
-                 if 'data' in data: logger.debug(f"Data keys: {list(data['data'].keys())}")
-                 else: logger.debug("Response has no 'data' key.")
-                 # Consider returning data even if structure is unexpected, let caller handle it
-                 # return data # Optional: return potentially malformed data
-
+                logger.warning("API response structure may have changed. Missing expected data paths.")
+                logger.debug(f"Response keys: {list(data.keys())}")
+                if 'data' in data:
+                    logger.debug(f"Data keys: {list(data['data'].keys())}")
+            
             return data
-
+            
         except requests.exceptions.HTTPError as e:
-            logger.error(f"API request failed with HTTPError: {e}")
-            logger.error(f"Response status: {e.response.status_code}")
-            # Log response body for 4xx/5xx errors to understand the reason
+            logger.error(f"API request failed with HTTP status {e.response.status_code}")
             try:
                 error_details = e.response.json()
-                logger.error(f"Response JSON body: {json.dumps(error_details, indent=2)}")
-            except json.JSONDecodeError:
-                logger.error(f"Response text body: {e.response.text[:1000]}...") # Log snippet
+                logger.error(f"API error details: {json.dumps(error_details)[:500]}")
+            except:
+                logger.error(f"API error response: {e.response.text[:500]}")
             return None
-        except requests.exceptions.RequestException as e:
-            logger.error(f"API request failed with RequestException: {e}")
+        except Exception as e:
+            logger.error(f"Failed to fetch tweet data: {e}")
             return None
-        except json.JSONDecodeError as e:
-             logger.error(f"Failed to decode API response JSON: {e}")
-             # Log the raw response text that failed to parse
-             if 'response' in locals() and response:
-                 logger.error(f"Raw response text causing JSON error: {response.text[:1000]}...")
-             return None
 
-    def extract_media_urls_from_api_data(self, tweet_data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    def extract_media_urls_from_api_data(self, tweet_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Extracts media URLs (image, video, gif) from the raw API tweet data.
-        Prioritizes higher quality formats.
-        Returns a list of media items or None.
+        Extracts all media URLs (images, GIFs, videos) from the tweet data.
+        Follows exactly the same path traversal as the original script.
         """
-        # ---> FIX: Adjust JSON path traversal based on the expected response structure
-        # The structure used in twitter-media-extractor.py seems more direct:
-        # data -> threaded_conversation_with_injections_v2 -> instructions -> [0] -> entries -> [0] -> content -> itemContent -> tweet_results -> result -> legacy -> extended_entities -> media
-        # This assumes the first instruction and first entry contain the main tweet. This is common but might break for complex conversations.
-
-        if not tweet_data or 'data' not in tweet_data:
-            logger.warning("Cannot extract media: Invalid or empty tweet_data provided.")
-            return None
-
+        logger.info("Extracting media URLs from tweet data")
+        
         media_items = []
+        
         try:
-            # Navigate the expected structure
-            instructions = tweet_data.get('data', {}).get('threaded_conversation_with_injections_v2', {}).get('instructions', [])
-            if not instructions:
-                logger.warning("Could not find 'instructions' in API response data.")
-                return None
-
-            # Find the 'TimelineAddEntries' instruction, often the first one
-            entries = []
-            for instruction in instructions:
-                if instruction.get('type') == 'TimelineAddEntries':
-                    entries.extend(instruction.get('entries', []))
-                    # Break if we assume the first AddEntries is sufficient, or iterate all
-                    # break # Let's stick to iterating all for robustness
-
-            if not entries:
-                 logger.warning("Could not find 'TimelineAddEntries' instructions or they were empty.")
-                 return None
-
-            tweet_results = None
-            # Iterate through entries to find the one containing the main tweet item
-            for entry in entries:
-                # Check different potential paths as structure can vary slightly
-                content = entry.get('content', {})
-                item_content = content.get('itemContent', {})
-                tweet_results_candidate = item_content.get('tweet_results', {}).get('result')
-
-                # Check if it's a valid tweet result (not a tombstone placeholder etc.)
-                # and potentially matches the requested tweet_id if needed (though TweetDetail usually focuses on one)
-                if tweet_results_candidate and tweet_results_candidate.get('__typename') == 'Tweet':
-                    # Found the main tweet entry
-                    tweet_results = tweet_results_candidate
-                    break
-                elif content.get('entryType') == 'TimelineTimelineItem' and item_content.get('itemType') == 'Tweet':
-                     # Alternative structure check
-                     if tweet_results_candidate and tweet_results_candidate.get('__typename') == 'Tweet':
-                         tweet_results = tweet_results_candidate
-                         break
-
-
-            if not tweet_results:
-                 logger.warning("Could not find valid 'tweet_results' (__typename: Tweet) in API response entries.")
-                 # Log structure for debugging
-                 # logger.debug(f"Entries structure sample: {json.dumps(entries[0] if entries else {}, indent=2)[:1000]}")
-                 return None
-
-            # Check for tombstone (deleted/unavailable tweet) - Already checked __typename above, but double check legacy if needed
-            if tweet_results.get('__typename') != 'Tweet': # e.g., 'TweetTombstone'
-                reason = "Unknown"
-                if tweet_results.get('__typename') == 'TweetTombstone':
-                    reason = tweet_results.get('tombstone',{}).get('text',{}).get('text', 'Unavailable')
-                logger.warning(f"Tweet is unavailable ({tweet_results.get('__typename')}). Reason: {reason}")
-                return [] # Return empty list for unavailable tweets
-
-            # Navigate to media entities (use legacy path as in extractor)
-            legacy_data = tweet_results.get('legacy', {})
-            extended_entities = legacy_data.get('extended_entities', {})
-            media_list = extended_entities.get('media', [])
-
-            if not media_list:
-                logger.info("No media found in the 'legacy.extended_entities.media' of the API data.")
-                return [] # Return empty list if no media
-
-            for index, media in enumerate(media_list):
-                media_type = media.get('type')
-                media_item = {'index': index, 'type': media_type, 'url': None, 'extension': None}
-
+            # Navigate the nested structure to find the tweet information - EXACT same path as original
+            tweet_result = tweet_data['data']['threaded_conversation_with_injections_v2']['instructions'][0]['entries'][0]['content']['itemContent']['tweet_results']['result']
+            
+            # Extract the extended entities which contain media
+            extended_entities = tweet_result.get('legacy', {}).get('extended_entities', {})
+            
+            if not extended_entities or 'media' not in extended_entities:
+                logger.warning("No media found in tweet")
+                return []
+            
+            # Process all media items
+            for index, media in enumerate(extended_entities['media']):
+                media_type = media.get('type', '')
+                media_item = {
+                    'type': media_type,
+                    'index': index,
+                    'url': None,
+                    'extension': None
+                }
+                
                 if media_type == 'photo':
-                    # Use original quality URL format if possible
-                    base_url = media.get('media_url_https')
-                    if base_url:
-                         # Extractor just uses media_url_https directly. Let's stick to that for simplicity unless proven otherwise.
-                         # Twitter often appends ?format=jpg&name=orig or similar via params, not ':orig' suffix now.
-                         # The base URL itself is usually the highest res available via this API path.
-                         media_item['url'] = base_url
-                         # Determine extension from URL path, default to jpg
-                         parsed_path = urlparse(base_url).path
-                         ext = Path(parsed_path).suffix[1:].lower() if Path(parsed_path).suffix else None
-                         media_item['extension'] = ext if ext in ['jpg', 'jpeg', 'png', 'webp'] else 'jpg'
-                    else:
-                         logger.warning(f"Photo media item at index {index} missing 'media_url_https'.")
-
-                elif media_type in ['video', 'animated_gif']:
+                    # For photos, use the highest quality version
+                    media_item['url'] = media.get('media_url_https', '')
+                    media_item['extension'] = 'jpg'  # Most Twitter images are JPGs
+                    
+                elif media_type == 'video':
+                    # For videos, find the highest quality MP4
                     video_info = media.get('video_info', {})
                     variants = video_info.get('variants', [])
-                    # Filter for mp4 and sort by bitrate (higher is better)
-                    mp4_variants = [v for v in variants if v.get('content_type') == 'video/mp4' and v.get('bitrate') is not None]
+                    
+                    # Find the highest quality MP4 variant
+                    mp4_variants = [v for v in variants if v.get('content_type') == 'video/mp4']
                     if mp4_variants:
-                        # Sort by bitrate descending
-                        mp4_variants.sort(key=lambda v: v['bitrate'], reverse=True)
-                        best_variant = mp4_variants[0]
+                        best_variant = max(mp4_variants, key=lambda v: v.get('bitrate', 0))
                         media_item['url'] = best_variant['url']
                         media_item['extension'] = 'mp4'
-                    elif variants: # Fallback if no MP4 found
-                         non_mp4_variants = [v for v in variants if v.get('url')]
-                         if non_mp4_variants:
-                            # Try to find HLS/M3U8 - not directly downloadable but maybe useful info
-                            hls_variant = next((v for v in non_mp4_variants if v.get('content_type') == 'application/x-mpegURL'), None)
-                            if hls_variant:
-                                logger.warning(f"No MP4 variant found for {media_type} at index {index}. Found HLS playlist: {hls_variant['url']}")
-                                # Don't set URL as it's not directly downloadable
-                            else:
-                                logger.warning(f"No MP4 variant found for {media_type} at index {index}. Found other types: {[v.get('content_type') for v in non_mp4_variants]}")
-                                # Could potentially try the first available URL as a last resort, but likely not MP4
-                                # best_fallback = max(non_mp4_variants, key=lambda v: v.get('bitrate', 0)) if any('bitrate' in v for v in non_mp4_variants) else non_mp4_variants[0]
-                                # media_item['url'] = best_fallback['url']
-                                # media_item['extension'] = 'ts' # guess?
-                         else:
-                            logger.warning(f"No usable video variants with URLs found for {media_type} at index {index}.")
-                    else:
-                        logger.warning(f"{media_type.capitalize()} media item at index {index} missing 'video_info' or 'variants'.")
-
-                else:
-                    logger.warning(f"Unsupported media type '{media_type}' encountered at index {index}.")
-
-                if media_item.get('url'):
+                    
+                elif media_type == 'animated_gif':
+                    # For GIFs, get the MP4 version (Twitter converts GIFs to MP4)
+                    video_info = media.get('video_info', {})
+                    variants = video_info.get('variants', [])
+                    
+                    if variants:
+                        # There's usually only one variant for GIFs
+                        media_item['url'] = variants[0]['url']
+                        media_item['extension'] = 'mp4'  # Twitter serves GIFs as MP4s
+                
+                # Add to the list if we found a URL
+                if media_item['url']:
                     media_items.append(media_item)
-                    logger.info(f"Found {media_type} URL (index {index}): ...{media_item['url'][-50:]}") # Log end of URL
+                    logger.info(f"Found {media_type} URL: {media_item['url']}")
                 else:
-                     logger.warning(f"Could not extract valid/downloadable URL for {media_type} at index {index}.")
-
+                    logger.warning(f"Could not extract URL for {media_type} at index {index}")
+            
             return media_items
-
-        except (KeyError, IndexError, TypeError) as e:
-            logger.error(f"Error parsing API data for media URLs: {e}. Structure might have changed.", exc_info=True)
-            # Log structure for debugging
-            logger.debug(f"Problematic tweet_data structure snippet: {json.dumps(tweet_data, indent=2)[:1500]}...")
-            return None # Indicate failure to parse
+            
+        except (KeyError, IndexError) as e:
+            logger.error(f"Failed to extract media URLs: {e}")
+            # Log the structure for debugging
+            try:
+                if 'data' in tweet_data and 'threaded_conversation_with_injections_v2' in tweet_data['data']:
+                    instructions = tweet_data['data']['threaded_conversation_with_injections_v2'].get('instructions', [])
+                    if instructions:
+                        logger.debug(f"Instructions count: {len(instructions)}")
+                        if len(instructions) > 0:
+                            entries = instructions[0].get('entries', [])
+                            logger.debug(f"Entries count: {len(entries)}")
+            except Exception as debug_e:
+                logger.error(f"Error while debugging structure: {debug_e}")
+            
+            return []  # Return empty list on error

@@ -149,6 +149,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
     return "\n".join(content)
 
 
+
 def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
     """
     Processes a single Todoist task: extracts URLs, scrapes them, and returns results.
@@ -190,21 +191,25 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                 url,
                 text_model=args.text_model,
                 vision_model=args.vision_model, # Still passed, but used less now
-                download_media=args.download_twitter_media,
-                media_output_dir=args.twitter_media_output,
+                download_media=args.download_twitter_media, # CRITICAL: Pass the download_media flag
+                media_output_dir=args.twitter_media_output, # CRITICAL: Pass the output directory
                 use_search_fallback=not args.no_search_fallback # Pass fallback flag
             )
 
             if scrape_result and scrape_result.get('content') and not scrape_result.get('error'):
-                 processed_url_results.append(scrape_result)
-                 any_scrape_successful = True
-                 logger.info(f"  ✓ Successfully scraped: {url}")
+                processed_url_results.append(scrape_result)
+                any_scrape_successful = True
+                # Log downloaded media if any
+                if scrape_result.get('downloaded_media_paths'):
+                    logger.info(f"  ✓ Successfully downloaded {len(scrape_result['downloaded_media_paths'])} media files for: {url}")
+                else:
+                    logger.info(f"  ✓ Successfully scraped: {url}")
             elif scrape_result: # Scrape attempted, but failed or no content
-                 processed_url_results.append(scrape_result) # Keep result to show error in report
-                 logger.warning(f"  ⚠ Failed to get valid content for: {url} (Error: {scrape_result.get('error', 'No content')})")
+                processed_url_results.append(scrape_result) # Keep result to show error in report
+                logger.warning(f"  ⚠ Failed to get valid content for: {url} (Error: {scrape_result.get('error', 'No content')})")
             else: # Scraper returned None (should be rare)
-                 processed_url_results.append({'url': url, 'error': 'Scraper returned None', 'content': '[Error: Scraper failed unexpectedly]'})
-                 logger.error(f"  ✕ Scraper returned None for URL: {url}")
+                processed_url_results.append({'url': url, 'error': 'Scraper returned None', 'content': '[Error: Scraper failed unexpectedly]'})
+                logger.error(f"  ✕ Scraper returned None for URL: {url}")
 
 
         mark_as_failed = not any_scrape_successful
@@ -223,7 +228,7 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
             api.close_task(task_id=task_id)
             final_status = 'closed'
         else: # Success but closing disabled
-             logger.info(f"  Task {task_id} processed successfully, not closing (--no-close).")
+            logger.info(f"  Task {task_id} processed successfully, not closing (--no-close).")
 
     except Exception as e:
         logger.error(f"  ✕ Failed to update/close task {task_id}: {e}")
@@ -233,13 +238,12 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
         'status': final_status,
         'task_id': task_id,
         'original_task': { # Include original task details for the report
-             'content': task_content,
-             'description': task_description,
-             'labels': task_labels
-             },
+            'content': task_content,
+            'description': task_description,
+            'labels': task_labels
+            },
         'processed_urls': processed_url_results
     }
-
 
 def main():
     parser = argparse.ArgumentParser(description='Process Todoist tasks: scrape URLs, summarize, and report.')

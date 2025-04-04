@@ -599,8 +599,8 @@ Summary:"""
         media_output_dir: str = "./downloads"
         ) -> Optional[Dict[str, Any]]:
         """
-        Processes Twitter/X content using the new modular structure.
-        Ensures valid session, extracts page content, optionally fetches API data and downloads media.
+        Processes Twitter/X content using the modular structure.
+        Ensures valid session, extracts page content, fetches API data and downloads media if requested.
         """
         logger.info(f"Processing Twitter/X URL: {url}")
 
@@ -647,58 +647,108 @@ Summary:"""
             'details': page_details, # Contains text, user, time, urls etc.
             'media_urls': [],
             'downloaded_media_paths': [],
-            'content': f"Tweet by @{page_details.get('user_handle', 'unknown')}: {page_details.get('text', '[No text content found]')}" # Basic content string
+            'extraction_method': 'playwright_bs4',
         }
 
+        # Create a rich formatted content string similar to the original implementation
+        user_handle = page_details.get('user_handle', 'unknown')
+        user_name = page_details.get('user_name', '')
+        tweet_text = page_details.get('text', '[No text content found]')
+        timestamp = page_details.get('display_time', '')
+        
+        content_parts = [
+            f"Tweet by @{user_handle} ({user_name})",
+            f"Posted {timestamp}" if timestamp else "",
+            "---",
+            tweet_text,
+        ]
+        
+        # Add URLs if present
+        embedded_urls = page_details.get('embedded_urls', [])
+        if embedded_urls:
+            content_parts.append("---")
+            content_parts.append("URLs in tweet:")
+            for url in embedded_urls:
+                content_parts.append(f"- {url}")
+                
+        # Create the initial content string    
+        result['content'] = "\n".join(filter(None, content_parts))
 
-        # 4. Fetch API Data & Media if needed (currently needed for reliable media URLs)
-        #    Decide if API call is always needed or only for downloads. Let's call for media URLs always for now.
-        media_items = None
+        # 4. Fetch API Data & Media URLs
+        media_items = []  # Initialize as empty list instead of None
         try:
-             api_client = TwitterAPIClient(session_path)
-             api_data = api_client.fetch_tweet_data_api(tweet_id)
-             if api_data:
-                  media_items = api_client.extract_media_urls_from_api_data(api_data)
-                  if media_items:
-                       result['media_urls'] = [item['url'] for item in media_items]
-                       logger.info(f"Found {len(media_items)} media items via API.")
-                  else:
-                       logger.info("No media items found via API.")
-             else:
-                  logger.warning("Failed to fetch API data for tweet. Media information might be incomplete.")
-                  result['error'] = result.get('error', '') + '; API data fetch failed'
+            api_client = TwitterAPIClient(session_path)
+            # CRITICAL: First get the tokens
+            if not api_client._get_tokens():
+                logger.error("Failed to get authentication tokens")
+                result['error'] = 'Failed to get authentication tokens'
+            else:
+                # Now fetch tweet data for media extraction
+                api_data = api_client.fetch_tweet_data_api(tweet_id)
+                
+                if api_data:
+                    # Extract media URLs - this is the critical step for downloading
+                    media_items = api_client.extract_media_urls_from_api_data(api_data)
+                    if media_items:
+                        result['media_urls'] = [item['url'] for item in media_items if item.get('url')]
+                        logger.info(f"Found {len(media_items)} media items via API.")
+                        
+                        # Add media count to content
+                        result['content'] += f"\n\nMedia: {len(media_items)} items detected"
+                    else:
+                        logger.info("No media items found via API.")
+                else:
+                    logger.warning("Failed to fetch API data for tweet. Media information might be incomplete.")
+                    result['error'] = result.get('error', '') + '; API data fetch failed'
 
         except Exception as api_e:
-             logger.error(f"Error during API fetch or media extraction: {api_e}")
-             result['error'] = result.get('error', '') + f'; API processing error: {api_e}'
-
+            logger.error(f"Error during API fetch or media extraction: {api_e}", exc_info=True)
+            result['error'] = result.get('error', '') + f'; API processing error: {api_e}'
 
         # 5. Download Media if Requested and Available
+        # CRITICAL: Debug log to check media_items content
+        logger.info(f"Media items to download: {len(media_items)} (Download requested: {download_media})")
+        if media_items:
+            logger.debug(f"First media item: {media_items[0] if media_items else 'None'}")
+
         if download_media and media_items:
-            logger.info("Media download requested, proceeding with download...")
+            logger.info(f"Media download requested for {len(media_items)} items, proceeding with download...")
             try:
-                 downloader = TwitterMediaDownloader(output_dir=media_output_dir)
-                 downloaded_files_info = downloader.download_media_items(media_items, page_details, tweet_id)
-                 result['downloaded_media_paths'] = [f['path'] for f in downloaded_files_info]
-                 if result['downloaded_media_paths']:
-                      # Append download info to the main content string
-                      result['content'] += f"\n[Downloaded {len(result['downloaded_media_paths'])} media file(s)]"
+                # Create output directory if it doesn't exist
+                os.makedirs(media_output_dir, exist_ok=True)
+                
+                downloader = TwitterMediaDownloader(output_dir=media_output_dir)
+                downloaded_files_info = downloader.download_media_items(media_items, page_details, tweet_id)
+                
+                if downloaded_files_info:
+                    result['downloaded_media_paths'] = [f['path'] for f in downloaded_files_info]
+                    
+                    # Update content with download information
+                    media_types = {}
+                    for file_info in downloaded_files_info:
+                        media_type = file_info.get('type', 'unknown')
+                        media_types[media_type] = media_types.get(media_type, 0) + 1
+                    
+                    download_info = [f"Downloaded {len(downloaded_files_info)} media files:"]
+                    for media_type, count in media_types.items():
+                        download_info.append(f"- {media_type.capitalize()}: {count}")
+                    
+                    result['content'] += "\n\n" + "\n".join(download_info)
+                    logger.info(f"Successfully downloaded {len(downloaded_files_info)} media files")
+                else:
+                    logger.warning("No media files were successfully downloaded")
+                    result['content'] += "\n\n[Note: Media download was attempted but no files were successfully downloaded]"
+                    
             except Exception as dl_e:
-                 logger.error(f"Error during media download process: {dl_e}")
-                 result['error'] = result.get('error', '') + f'; Media download error: {dl_e}'
+                logger.error(f"Error during media download process: {dl_e}", exc_info=True)
+                result['error'] = result.get('error', '') + f'; Media download error: {dl_e}'
+                result['content'] += "\n\n[Error during media download: Check logs for details]"
         elif download_media and not media_items:
-             logger.info("Media download requested, but no media items were found via API.")
-
-
-        # 6. Finalize Content String (Could add more details here if needed)
-        # The basic content string is already set. Could enhance with media counts etc.
-        if result['media_urls']:
-             result['content'] += f"\n[Media detected: {len(result['media_urls'])} item(s)]"
-
+            logger.info("Media download requested, but no media items were found via API.")
+            result['content'] += "\n\n[Note: No media files found to download]"
 
         logger.info(f"✓ Successfully processed Twitter URL: {url}")
         return result
-
 
     # --- Updated scrape_url Method ---
     @staticmethod
