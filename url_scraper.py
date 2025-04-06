@@ -21,14 +21,12 @@ from urllib.parse import urlparse, parse_qs, urlencode
 # --- Import New Twitter Modules ---
 from twitter_session_manager import TwitterSessionManager
 from twitter_api_client import TwitterAPIClient
-from twitter_content_extractor import TwitterContentExtractor
+from twitter_content_extractor import TweetExtractor
 from twitter_media_downloader import TwitterMediaDownloader
 # ---
-
 import logging # Ensure logging is configured if not already
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 
 # --- Existing YouTubeProcessor (No changes needed here unless API key handling changes) ---
 class YouTubeProcessor:
@@ -152,7 +150,6 @@ class YouTubeProcessor:
             return None
 
 # --- End YouTubeProcessor ---
-
 
 class URLScraper:
     # --- Existing static methods (clean_url, is_valid_url, etc.) ---
@@ -342,7 +339,7 @@ class URLScraper:
 
     # --- Keep LLM summarization methods ---
     @staticmethod
-    def _call_llm_completion(prompt: str, text_model: str, max_tokens: int = 150) -> str:
+    def call_llm_completion(prompt: str, text_model: str, max_tokens: int = 150) -> str:
          """Helper function to call the LLM completion API."""
          try:
              messages = [{"content": prompt, "role": "user"}]
@@ -372,7 +369,6 @@ class URLScraper:
              # logger.error(traceback.format_exc())
              return f"Error generating summary: {e}"
 
-
     @staticmethod
     def get_webpage_summary(text: str, text_model: str = "ollama/llama3.2:3b") -> str:
         """Get summary of webpage content using LLM."""
@@ -393,8 +389,7 @@ Webpage Content:
 \"\"\"
 
 Summary:"""
-        return URLScraper._call_llm_completion(prompt, text_model, max_tokens=150)
-
+        return URLScraper.call_llm_completion(prompt, text_model, max_tokens=150)
 
     @staticmethod
     def get_pdf_summary(text: str, text_model: str = "ollama/llama3.2:3b") -> str:
@@ -415,8 +410,7 @@ Document Content:
 \"\"\"
 
 Summary:"""
-        return URLScraper._call_llm_completion(prompt, text_model, max_tokens=150)
-
+        return URLScraper.call_llm_completion(prompt, text_model, max_tokens=150)
 
     @staticmethod
     def get_github_summary(repo_info: Dict[str, Any], text_model: str = "ollama/llama3.2:3b") -> str:
@@ -453,14 +447,14 @@ Repository Information:
 \"\"\"
 
 Summary:"""
-        return URLScraper._call_llm_completion(prompt, text_model, max_tokens=150)
+        return URLScraper.call_llm_completion(prompt, text_model, max_tokens=150)
 
     @staticmethod
     def get_youtube_summary(details: Dict[str, Any], content_type: str, text_model: str) -> str:
         """Generate a summary string for YouTube content."""
         if not details: return "Could not retrieve YouTube details."
 
-        if content_type == 'video':
+        if content_type == 'Video':
              # Limit description length for summary prompt
              description_snippet = (details.get('description', '')[:500] + '...') if len(details.get('description', '')) > 500 else details.get('description', '')
              summary_text = (
@@ -589,7 +583,6 @@ Summary:"""
         else:
             return True # Log other types like 'info', 'debug' if they occur
 
-
     # --- NEW process_twitter_content method ---
     @staticmethod
     def process_twitter_content(
@@ -608,7 +601,7 @@ Summary:"""
         if not session_manager.ensure_valid_session():
             logger.error("Failed to ensure a valid Twitter/X session. Cannot process tweet.")
             return {
-                'type': 'twitter',
+                'type': 'Twitter',
                 'url': url,
                 'error': 'Session validation/refresh failed.',
                 'content': "[Error: Could not authenticate Twitter/X session]"
@@ -616,8 +609,8 @@ Summary:"""
         session_path = session_manager.get_session_path()
 
         # 2. Extract Content Directly from Page
-        content_extractor = TwitterContentExtractor()
-        page_details = content_extractor.extract_tweet_details_from_page(url, session_path)
+        content_extractor = TweetExtractor()
+        page_details = content_extractor.extract_tweet(url, session_path)
 
         if not page_details or page_details.get('error'):
             error_msg = page_details.get('error') if page_details else "Failed to extract page details (None returned)"
@@ -649,18 +642,21 @@ Summary:"""
             'downloaded_media_paths': [],
             'extraction_method': 'playwright_bs4',
         }
-
+        
         # Create a rich formatted content string similar to the original implementation
         user_handle = page_details.get('user_handle', 'unknown')
         user_name = page_details.get('user_name', '')
         tweet_text = page_details.get('text', '[No text content found]')
-        timestamp = page_details.get('display_time', '')
+        timestamp = page_details.get('timestamp', '')
+        urls = page_details.get('urls', [])
         
         content_parts = [
             f"Tweet by @{user_handle} ({user_name})",
             f"Posted {timestamp}" if timestamp else "",
             "---",
             tweet_text,
+            "---",
+            f"URLs in tweet: {urls}" if urls else "",
         ]
         
         # Add URLs if present

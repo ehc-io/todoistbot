@@ -103,7 +103,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
             ])
 
         # Processed URL Content
-        content.append("### Scraped Content")
+        # content.append("### Scraped Content")
         for url_data in task_result.get('processed_urls', []):
              url = url_data.get('url', 'N/A')
              scraped_content = url_data.get('content', '[No content extracted]')
@@ -111,33 +111,17 @@ def generate_markdown(tasks_data: List[dict]) -> str:
              extraction_method = url_data.get('extraction_method', '') # e.g., pandoc_llm, google_search
              error = url_data.get('error')
 
-             content.append(f"**Source URL ({content_type}):** <{url}>") # Make URL clickable
+             content.append(f"**Source URL**: [{content_type}]({url})")
 
              if extraction_method: content.append(f"*Extraction Method: {extraction_method}*")
 
              if error:
-                 content.append(f"> **Error:** {error}")
+                 content.append(f"**Error:** {error}")
              elif scraped_content:
                  # Add blockquote for scraped content for visual separation
-                 content.append(f"> {scraped_content.replace(chr(10), chr(10) + '> ')}")
+                 content.append(f"{scraped_content}")
              else:
-                 content.append("> [No content or error reported for this URL]")
-
-             # --- Handle Twitter Specific Details ---
-             if content_type == 'twitter' and 'details' in url_data:
-                  details = url_data['details']
-                  content.append(">") # Empty line in blockquote for spacing
-                  content.append(f"> **Tweet Details:**")
-                  content.append(f"> - User: @{details.get('user_handle', 'N/A')} ({details.get('user_name', 'N/A')})")
-                  content.append(f"> - Posted: {details.get('created_at_iso', 'N/A')}")
-                  if details.get('embedded_urls'):
-                       content.append(f"> - Links in Tweet: {len(details['embedded_urls'])}")
-                  if url_data.get('downloaded_media_paths'):
-                       content.append(f"> - Media Downloads: {len(url_data['downloaded_media_paths'])}")
-                       # Optionally list paths:
-                       # for path in url_data['downloaded_media_paths']:
-                       #     content.append(f">   - {Path(path).name}")
-             # --- End Twitter Specific Details ---
+                 content.append("No content or error reported for this URL]")
 
              content.append("") # Spacer after each URL's content
 
@@ -147,7 +131,6 @@ def generate_markdown(tasks_data: List[dict]) -> str:
         ])
 
     return "\n".join(content)
-
 
 
 def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
@@ -348,7 +331,7 @@ def main():
                   stats.failed_tasks +=1
 
 
-        # --- Generate and Save/Print Report ---
+        # --- Generate Report ---
         if not processed_tasks_data:
             logger.info("No tasks were successfully processed in this run.")
         else:
@@ -383,7 +366,7 @@ def main():
                     # Print to screen as fallback?
                     print("\n" + "="*80 + "\nError saving file! Displaying report on screen:\n" + "="*80 + "\n")
                     print(markdown_content)
-                    print("\n" + "="*80)
+                    # print("\n" + "="*80)
 
 
         # --- Final Summary ---
