@@ -632,7 +632,6 @@ Summary:"""
                 'content': "[Error: Could not determine Tweet ID]"
             }
 
-        # 3. Prepare Result Dictionary (start with page details)
         result = {
             'type': 'twitter',
             'url': url,
@@ -643,32 +642,54 @@ Summary:"""
             'extraction_method': 'playwright_bs4',
         }
         
-        # Create a rich formatted content string similar to the original implementation
+        # Create a formatted content string similar to _format_tweet_output
         user_handle = page_details.get('user_handle', 'unknown')
         user_name = page_details.get('user_name', '')
         tweet_text = page_details.get('text', '[No text content found]')
         timestamp = page_details.get('timestamp', '')
         urls = page_details.get('urls', [])
+        embedded_urls = page_details.get('embedded_urls', [])
         
+        if timestamp:
+            try:
+                # Check if it's a numeric timestamp (unix timestamp)
+                if str(timestamp).isdigit() or (isinstance(timestamp, (int, float))):
+                    # Convert unix timestamp to datetime and format
+                    dt = datetime.fromtimestamp(int(timestamp))
+                    formatted_timestamp = dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+                else:
+                    # If it's already a string format, use it as is
+                    formatted_timestamp = timestamp
+            except Exception as e:
+                logger.warning(f"Error formatting timestamp {timestamp}: {e}")
+                formatted_timestamp = str(timestamp)  # Fallback to 
+    
+        # Format the output with the requested style
         content_parts = [
-            f"Tweet by @{user_handle} ({user_name})",
-            f"Posted {timestamp}" if timestamp else "",
+            f"User: @{user_handle} ({user_name})  ",
+            f"Tweet ID: {tweet_id}  "  ,
+            f"Posted on: {formatted_timestamp}  " if formatted_timestamp else "Posted on: Unknown",
+            "",
             "---",
             tweet_text,
-            "---",
-            f"URLs in tweet: {urls}" if urls else "",
         ]
         
-        # Add URLs if present
-        embedded_urls = page_details.get('embedded_urls', [])
-        if embedded_urls:
-            content_parts.append("---")
+        # Add URLs section if any are found (combining both regular and embedded URLs)
+        all_urls = []
+        if urls and len(urls) > 0:
+            all_urls.extend(urls)
+        
+        if embedded_urls and len(embedded_urls) > 0:
+            all_urls.extend(embedded_urls)
+            
+        if all_urls:
             content_parts.append("URLs in tweet:")
-            for url in embedded_urls:
-                content_parts.append(f"- {url}")
+            for url in all_urls:
+                content_parts.append(f" - {url}")
+            # content_parts.append("---")
                 
-        # Create the initial content string    
-        result['content'] = "\n".join(filter(None, content_parts))
+        # Create the content string
+        result['content'] = "\n".join(content_parts)
 
         # 4. Fetch API Data & Media URLs
         media_items = []  # Initialize as empty list instead of None
