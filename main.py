@@ -111,15 +111,15 @@ def generate_markdown(tasks_data: List[dict]) -> str:
              extraction_method = url_data.get('extraction_method', '') # e.g., pandoc_llm, google_search
              error = url_data.get('error')
 
-             content.append(f"**Source URL**: [{content_type}]({url})")
-
-             if extraction_method: content.append(f"*Extraction Method: {extraction_method}*")
+            #  content.append(f"**Source URL**: [{content_type}]({url})  ")
+            #  content.append("---  ")
+             if extraction_method: content.append(f"*Extraction Method: {extraction_method}*  ")
 
              if error:
                  content.append(f"**Error:** {error}")
              elif scraped_content:
                  # Add blockquote for scraped content for visual separation
-                 content.append(f"{scraped_content}")
+                 content.append(f"{scraped_content}  ")
              else:
                  content.append("No content or error reported for this URL]")
 
