@@ -51,6 +51,7 @@ class URLExtractor:
         # Optional: Add more filtering here if needed (e.g., ignore certain domains)
         return [url for url in raw_urls if URLScraper.is_valid_url(url)]
 
+
 def get_api_key() -> str:
     api_key = os.getenv('TODOIST_API_KEY')
     if not api_key:
@@ -82,7 +83,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
         task_labels = task_result.get('original_task', {}).get('labels', [])
 
         content.extend([
-            f"## Task: {task_content}",
+            f"## Source: {task_content}",
             ""
         ])
 
