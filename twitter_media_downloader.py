@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from tqdm import tqdm
 from typing import List, Dict, Any
-
+from common import clean_filename
 logger = logging.getLogger(__name__)
 
 class TwitterMediaDownloader:
@@ -62,7 +62,10 @@ class TwitterMediaDownloader:
                     continue
 
                 # Construct filename matching the original script format: timestamp-user_handle-tweet_id-asset-index.ext
-                filename = f"{timestamp}-{user_handle_safe}-{tweet_id}-asset-{index + 1}.{extension}"
+                filename = f"{timestamp}-tweet-{user_handle_safe}-{tweet_id}-asset-{index + 1}.{extension}"
+                
+                # filename standardization
+                filename = clean_filename(filename)
                 output_path = self.output_dir / filename
 
                 try:
