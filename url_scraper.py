@@ -339,7 +339,7 @@ class URLScraper:
 
     # --- Keep LLM summarization methods ---
     @staticmethod
-    def call_llm_completion(prompt: str, text_model: str, max_tokens: int = 150) -> str:
+    def call_llm_completion(prompt: str, text_model: str, max_tokens: int = 250) -> str:
          """Helper function to call the LLM completion API."""
          try:
              messages = [{"content": prompt, "role": "user"}]
@@ -412,42 +412,146 @@ Document Content:
 Summary:"""
         return URLScraper.call_llm_completion(prompt, text_model, max_tokens=150)
 
-    @staticmethod
-    def get_github_summary(repo_info: Dict[str, Any], text_model: str = "ollama/llama3.2:3b") -> str:
-        """Get summary of GitHub repo content using LLM."""
-        # repo_info expected keys: url, about, readme_text, stats (dict with stars, forks, watchers)
-        if not repo_info: return "No GitHub info provided."
-
-        content_for_summary = f"""
-Repository URL: {repo_info.get('url', 'N/A')}
-About: {repo_info.get('about', 'N/A')}
-
-README/Content Snippet:
-\"\"\"
-{repo_info.get('readme_text', 'N/A')[:2000]}...
-\"\"\"
-
-Repository Statistics:
-- Stars: {repo_info.get('stats', {}).get('stars', 'N/A')}
-- Forks: {repo_info.get('stats', {}).get('forks', 'N/A')}
-- Watchers: {repo_info.get('stats', {}).get('watchers', 'N/A')}
-"""
-        # Truncate for LLM
-        max_chars = 14000
-        if len(content_for_summary) > max_chars:
-             content_for_summary = content_for_summary[:max_chars] + "..."
-             logger.debug("Truncated GitHub combined info for summarization.")
-
-
-        prompt = f"""Please provide a concise summary (around 100 words) of this GitHub project based on the provided information. Focus on its purpose, key features (if mentioned), and target audience. Ignore GitHub interface elements.
-
-Repository Information:
-\"\"\"
-{content_for_summary}
-\"\"\"
-
-Summary:"""
-        return URLScraper.call_llm_completion(prompt, text_model, max_tokens=150)
+    def scrape_github_repo_with_vision(
+        url: str, 
+        browser, 
+        vision_model: str,
+        save_screenshot: bool = True,  # New parameter to control screenshot saving
+        screenshot_dir: str = "screenshots"  # Default directory for saved screenshots
+    ) -> Dict[str, Any]:
+        """
+        Scrapes a GitHub repository by taking a screenshot and using a multimodal LLM to analyze it.
+        
+        Args:
+            url: The GitHub repository URL
+            browser: Playwright browser instance
+            vision_model: The vision-enabled LLM model to use
+            save_screenshot: Whether to save a permanent copy of the screenshot for debugging
+            screenshot_dir: Directory where screenshots should be saved
+            
+        Returns:
+            Dictionary with scraped information
+        """
+        logger.info(f"Processing GitHub repository with vision approach: {url}")
+        result = {'url': url, 'type': 'github', 'content': None, 'error': None}
+        screenshot_path = None  # Track the saved screenshot path
+        
+        try:
+            # Configure context for better screenshot quality
+            context_options = {
+                'viewport': {'width': 1280, 'height': 1600},  # Larger viewport to capture more content
+                'device_scale_factor': 1,
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            }
+            
+            context = browser.new_context(**context_options)    
+            page = context.new_page()
+            
+            # Navigate to the repo and wait for content to load
+            logger.debug(f"Navigating to GitHub repo: {url}")
+            page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            
+            # Wait for README to be visible (if present)
+            page.wait_for_timeout(3000)  # Additional time for dynamic content
+            
+            # Create a unique filename for the screenshot
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            repo_parts = url.rstrip('/').split('/')
+            repo_identifier = f"{repo_parts[-2]}_{repo_parts[-1]}" if len(repo_parts) >= 2 else "unknown_repo"
+            screenshot_filename = f"github_{repo_identifier}_{timestamp}.png"
+            
+            # Prepare screenshot directory if saving is enabled
+            if save_screenshot:
+                os.makedirs(screenshot_dir, exist_ok=True)
+                screenshot_path = os.path.join(screenshot_dir, screenshot_filename)
+                logger.info(f"Will save debug screenshot to: {screenshot_path}")
+                
+            # Take temporary screenshot for vision model processing
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=not save_screenshot) as tmp:
+                logger.debug(f"Taking screenshot of GitHub repo page")
+                page.screenshot(path=tmp.name, full_page=True)  # Capture full page
+                
+                # If saving is enabled, make a permanent copy of the screenshot
+                if save_screenshot:
+                    import shutil
+                    shutil.copy2(tmp.name, screenshot_path)
+                    logger.info(f"Debug screenshot saved to: {screenshot_path}")
+                    result['debug_screenshot'] = screenshot_path  # Add path to result
+                
+                # Convert to base64 for vision model
+                with open(tmp.name, "rb") as image_file:
+                    base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+                
+                # Don't delete if save_screenshot is True (handled by context manager)
+                
+                github_analysis_prompt = """"
+                    Provide a comprehensive description of this web page screenshot, including purpose, authors and technologies involved.
+                    Format your response as a concise but informative summary that captures the essence of the page.
+                """
+                logger.debug(f"Calling vision model ({vision_model}) for GitHub repo analysis")
+                
+                # Use the vision model for analysis
+                response = completion(
+                    model=vision_model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": github_analysis_prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{base64_image}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=500,  # Limit response length for efficiency
+                    temperature=0.3  # Lower temperature for more factual responses
+                )
+                
+                # Extract the content from the response
+                if response.choices and response.choices[0].message.content:
+                    result['content'] = response.choices[0].message.content.strip()
+                    result['extraction_method'] = 'github_vision'
+                    logger.info(f"Successfully analyzed GitHub repo via vision model")
+                else:
+                    result['error'] = "Vision model returned empty or invalid response"
+                    result['content'] = "[Error: Failed to analyze GitHub repository with vision model]"
+                    logger.error("Vision model returned empty or invalid response for GitHub repo")
+                
+                # Optionally, extract the repo's title for better identification
+                try:
+                    repo_title = page.title()
+                    if repo_title:
+                        result['title'] = repo_title
+                except Exception as title_err:
+                    logger.warning(f"Failed to extract repo title: {title_err}")
+                    
+        except PlaywrightTimeout as e:
+            logger.error(f"Timeout accessing GitHub repo {url}: {e}")
+            result['error'] = f"GitHub page load timeout: {e}"
+            result['content'] = "[Error: Timed out loading GitHub repository page]"
+            
+        except PlaywrightError as e:
+            logger.error(f"Playwright error processing GitHub repo {url}: {e}")
+            result['error'] = f"Playwright error: {e}"
+            result['content'] = f"[Error: Failed to load GitHub page - {e}]"
+            
+        except Exception as e:
+            logger.error(f"Unexpected error analyzing GitHub repo with vision: {e}", exc_info=True)
+            result['error'] = f"Vision analysis error: {e}"
+            result['content'] = "[Error: Unexpected failure during GitHub vision analysis]"
+            
+        finally:
+            # Clean up Playwright resources
+            if 'page' in locals():
+                page.close()
+            if 'context' in locals():
+                context.close()
+                
+        return result
 
     @staticmethod
     def get_youtube_summary(details: Dict[str, Any], content_type: str, text_model: str) -> str:
@@ -553,30 +657,44 @@ Summary:"""
             logger.error(f"Error performing Google Search for {url}: {str(e)}")
             return None
 
-    # --- Console message filter (keep as is) ---
     @staticmethod
     def filter_console_message(msg):
-        # ... (keep the existing implementation) ...
+        # Check if 'text' is a method or attribute
+        if hasattr(msg, 'text'):
+            if callable(msg.text):
+                msg_text = msg.text().lower()
+            else:
+                msg_text = msg.text.lower()
+        else:
+            msg_text = ''
+            
+        # Same check for 'type'
+        if hasattr(msg, 'type'):
+            if callable(msg.type):
+                msg_type = msg.type().lower()
+            else:
+                msg_type = msg.type.lower()
+        else:
+            msg_type = ''
+
         ignore_patterns = [
             "Failed to load resource", "net::ERR_", "status of 403",
             "status of 404", "status of 429", "favicon.ico"
         ]
-        msg_text = msg.text().lower() if hasattr(msg, 'text') else ''
-        msg_type = msg.type().lower() if hasattr(msg, 'type') else ''
 
         if any(pattern.lower() in msg_text for pattern in ignore_patterns):
             return False # Silence common errors
 
         # Silence specific noisy warnings (add more as needed)
-        if "Duplicate key 'aria-labelledby'" in msg.text(): return False
-        if "DevTools failed to load source map" in msg.text(): return False
+        if "Duplicate key 'aria-labelledby'" in msg_text: return False
+        if "DevTools failed to load source map" in msg_text: return False
 
         # Log important types, filter others
         if msg_type in ["error", "warning"]:
-             # Log JS errors and non-resource warnings
-             if "failed to load resource" not in msg_text:
-                  return True # Log it
-             return False # Silence resource load errors/warnings
+            # Log JS errors and non-resource warnings
+            if "failed to load resource" not in msg_text:
+                return True # Log it
+            return False # Silence resource load errors/warnings
         elif msg_type == "log":
             # Decide if general logs are needed (can be very noisy)
             return False # Silence general console.log messages by default
@@ -867,34 +985,19 @@ Summary:"""
                     # Check if it's GitHub after navigation (in case of redirects)
                     final_url = page.url
                     if URLScraper.is_github_repo_url(final_url):
-                         result['type'] = 'github'
-                         extraction_method = 'github_playwright'
-                         logger.info("Processing as GitHub URL...")
-                         # Simplified GitHub Extraction: Get Readme/About, Generate Summary
-                         repo_info = {'url': final_url, 'about': '', 'readme_text': '', 'stats': {}}
-                         try:
-                              # Extract "About"
-                              about_el = page.query_selector('.BorderGrid--spacious .f4.my-3') # Updated selector? Inspect needed.
-                              if about_el: repo_info['about'] = about_el.text_content().strip()
-
-                              # Extract README (common selector)
-                              readme_el = page.query_selector('#readme article.markdown-body')
-                              if readme_el: repo_info['readme_text'] = readme_el.text_content().strip()
-
-                               # Extract Stats (selectors might change)
-                              stars_el = page.query_selector('#repo-stars-counter-star')
-                              forks_el = page.query_selector('#repo-network-counter')
-                              watchers_el = page.query_selector('#repo-watchers-counter')
-                              if stars_el: repo_info['stats']['stars'] = stars_el.get_attribute('title')
-                              if forks_el: repo_info['stats']['forks'] = forks_el.get_attribute('title')
-                              if watchers_el: repo_info['stats']['watchers'] = watchers_el.get_attribute('title')
-
-                              result['content'] = URLScraper.get_github_summary(repo_info, text_model)
-                         except PlaywrightError as gh_err:
-                              logger.error(f"Playwright error during GitHub element extraction: {gh_err}")
-                              result['error'] = f"GitHub processing error: {gh_err}"
-                              result['content'] = "[Error: Could not extract GitHub content]"
-
+                        result['type'] = 'github'
+                        extraction_method = 'github_playwright_vision_model'
+                        logger.info("Processing as GitHub URL...")
+                        # Simplified GitHub Extraction: Get Readme/About, Generate Summary
+                        # repo_info = {'url': final_url, 'about': '', 'readme_text': '', 'stats': {}}
+                        try:
+                        # Extract "About"
+                            github_result = URLScraper.scrape_github_repo_with_vision(final_url, browser, vision_model)
+                            result.update(github_result)
+                        except:
+                            logger.error("Error during LLM github summarization")
+                            result['error'] = "Error during LLM github summarization"
+                            result['content'] = "[Error: Could not extract GitHub content]"
                     else:
                          # Generic Webpage: Try Pandoc -> LLM
                          result['type'] = 'webpage'
@@ -920,7 +1023,6 @@ Summary:"""
                                         result['content'] = "[Error: Content extraction failed, and search fallback yielded no results]"
                               else:
                                    result['content'] = "[Error: Content extraction failed, search fallback disabled]"
-
 
                 except PlaywrightTimeout as e:
                     logger.error(f"Timeout loading page: {cleaned_url} - {e}")
