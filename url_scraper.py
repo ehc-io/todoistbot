@@ -412,20 +412,19 @@ Document Content:
 Summary:"""
         return URLScraper.call_llm_completion(prompt, text_model, max_tokens=150)
 
-    def scrape_github_repo_with_vision(
+    def _scrape_github_repo(
         url: str, 
         browser, 
-        vision_model: str,
+        text_model: str,
         save_screenshot: bool = True,  # New parameter to control screenshot saving
         screenshot_dir: str = "screenshots"  # Default directory for saved screenshots
     ) -> Dict[str, Any]:
         """
-        Scrapes a GitHub repository by taking a screenshot and using a multimodal LLM to analyze it.
-        
+        Scrapes a GitHub repository by using Text LLM Model
         Args:
             url: The GitHub repository URL
             browser: Playwright browser instance
-            vision_model: The vision-enabled LLM model to use
+            text_model: The text LLM model to use
             save_screenshot: Whether to save a permanent copy of the screenshot for debugging
             screenshot_dir: Directory where screenshots should be saved
             
@@ -465,85 +464,98 @@ Summary:"""
                 os.makedirs(screenshot_dir, exist_ok=True)
                 screenshot_path = os.path.join(screenshot_dir, screenshot_filename)
                 logger.info(f"Will save debug screenshot to: {screenshot_path}")
-                
-            # Take temporary screenshot for vision model processing
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=not save_screenshot) as tmp:
-                logger.debug(f"Taking screenshot of GitHub repo page")
-                page.screenshot(path=tmp.name, full_page=True)  # Capture full page
-                
-                # If saving is enabled, make a permanent copy of the screenshot
-                if save_screenshot:
-                    import shutil
-                    shutil.copy2(tmp.name, screenshot_path)
-                    logger.info(f"Debug screenshot saved to: {screenshot_path}")
-                    result['debug_screenshot'] = screenshot_path  # Add path to result
-                
-                # Convert to base64 for vision model
-                with open(tmp.name, "rb") as image_file:
-                    base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-                
-                # Don't delete if save_screenshot is True (handled by context manager)
-                
-                github_analysis_prompt = """"
-                    Provide a comprehensive description of this web page screenshot, including purpose, authors and technologies involved.
-                    Format your response as a concise but informative summary that captures the essence of the page.
-                """
-                logger.debug(f"Calling vision model ({vision_model}) for GitHub repo analysis")
-                
-                # Use the vision model for analysis
-                response = completion(
-                    model=vision_model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": github_analysis_prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{base64_image}"
-                                    }
-                                }
-                            ]
-                        }
-                    ],
-                    max_tokens=500,  # Limit response length for efficiency
-                    temperature=0.3  # Lower temperature for more factual responses
-                )
-                
-                # Extract the content from the response
-                if response.choices and response.choices[0].message.content:
-                    result['content'] = response.choices[0].message.content.strip()
-                    result['extraction_method'] = 'github_vision'
-                    logger.info(f"Successfully analyzed GitHub repo via vision model")
-                else:
-                    result['error'] = "Vision model returned empty or invalid response"
-                    result['content'] = "[Error: Failed to analyze GitHub repository with vision model]"
-                    logger.error("Vision model returned empty or invalid response for GitHub repo")
-                
-                # Optionally, extract the repo's title for better identification
-                try:
-                    repo_title = page.title()
-                    if repo_title:
-                        result['title'] = repo_title
-                except Exception as title_err:
-                    logger.warning(f"Failed to extract repo title: {title_err}")
+
+            # Instead of taking a screenshot for vision model processing
+            logger.debug(f"Extracting GitHub repo content using CSS selector")
+            
+            # Extract the main content using CSS selector
+            main_content = None
+            try:
+                main_element = page.query_selector('main')
+                if main_element:
+                    main_content = main_element.inner_text()
                     
+                    # Also extract repository statistics
+                    stats = {}
+                    
+                    # Try to extract stars, forks, watchers
+                    stats_selectors = {
+                        'stars': 'a[href$="/stargazers"]',
+                        'forks': 'a[href$="/forks"]',
+                        'watchers': 'a[href$="/watchers"]',
+                        'issues': 'a[href$="/issues"]'
+                    }
+                    
+                    for stat_name, selector in stats_selectors.items():
+                        try:
+                            stat_element = page.query_selector(selector)
+                            if stat_element:
+                                stat_text = stat_element.inner_text().strip()
+                                stats[stat_name] = stat_text
+                        except Exception as stat_err:
+                            logger.warning(f"Failed to extract {stat_name} stat: {stat_err}")
+                    
+                    # Try to get repository title/description
+                    repo_title = page.title()
+                    repo_description = ""
+                    description_element = page.query_selector('p[itemprop="description"]')
+                    if description_element:
+                        repo_description = description_element.inner_text().strip()
+                    
+                    # Combine all content for summary
+                    content_for_summary = f"Title: {repo_title}\n"
+                    content_for_summary += f"Description: {repo_description}\n\n"
+                    content_for_summary += f"Statistics:\n"
+                    for stat_name, stat_value in stats.items():
+                        content_for_summary += f"- {stat_name.capitalize()}: {stat_value}\n"
+                    content_for_summary += f"\nMain Content:\n{main_content}"
+                    
+                    # Create prompt for text-based LLM
+                    prompt = f"""
+                        Based on the content_for_summary provided to you as follows, generate a concise summary (around 200 words) of this github project page.
+                        Disregard whatever is related to the Github service itself. Consider only information related to the particular project this page points to.
+                        Make sure you provide Repository Statistics such as: Stars, Forks, and Commit activity as part of the summary.
+                        ---
+                        Repository Content:
+                        {content_for_summary}
+                        ---
+                        Output must in the following format:
+---
+Title of the Github Repo:
+Summary:
+Technologies: (which languages, frameworks, tools were used)
+Forks: 
+Stars:
+Commit Activity: (how many commits and when the last commit)
+                    """
+                    # Call text-based LLM for summary
+                    logger.debug(f"Calling text model ({text_model}) for GitHub repo analysis")
+                    summary = URLScraper.call_llm_completion(prompt, text_model, max_tokens=250)
+                    
+                    # Update result with the summary
+                    result['content'] = summary
+                    result['extraction_method'] = 'github_text_selector'
+                    logger.info(f"Successfully analyzed GitHub repo via text model")
+                else:
+                    result['error'] = "Could not find main content element on GitHub page"
+                    result['content'] = "[Error: Failed to extract GitHub repository content]"
+                    logger.error("Could not find main content element on GitHub page")
+            except Exception as extract_err:
+                logger.error(f"Error extracting GitHub content: {extract_err}", exc_info=True)
+                result['error'] = f"Content extraction error: {extract_err}"
+                result['content'] = "[Error: Failed to extract GitHub repository content]"
+                                
+                  
         except PlaywrightTimeout as e:
             logger.error(f"Timeout accessing GitHub repo {url}: {e}")
             result['error'] = f"GitHub page load timeout: {e}"
             result['content'] = "[Error: Timed out loading GitHub repository page]"
             
-        except PlaywrightError as e:
-            logger.error(f"Playwright error processing GitHub repo {url}: {e}")
-            result['error'] = f"Playwright error: {e}"
-            result['content'] = f"[Error: Failed to load GitHub page - {e}]"
-            
         except Exception as e:
             logger.error(f"Unexpected error analyzing GitHub repo with vision: {e}", exc_info=True)
             result['error'] = f"Vision analysis error: {e}"
             result['content'] = "[Error: Unexpected failure during GitHub vision analysis]"
-            
+
         finally:
             # Clean up Playwright resources
             if 'page' in locals():
@@ -552,6 +564,217 @@ Summary:"""
                 context.close()
                 
         return result
+
+    def scrape_github_repo(
+            url: str, 
+            browser, 
+            text_model: str,
+            save_screenshot: bool = True,  # Parameter to control screenshot saving
+            screenshot_dir: str = "screenshots"  # Default directory for saved screenshots
+        ) -> Dict[str, Any]:
+            """
+            Scrapes a GitHub repository using a mix of web scraping and LLM inference
+            Args:
+                url: The GitHub repository URL
+                browser: Playwright browser instance
+                text_model: The text LLM model to use
+                save_screenshot: Whether to save a permanent copy of the screenshot for debugging
+                screenshot_dir: Directory where screenshots should be saved
+                
+            Returns:
+                Dictionary with scraped information
+            """
+            logger.info(f"Processing GitHub repository: {url}")
+            result = {'url': url, 'type': 'github', 'content': None, 'error': None}
+            screenshot_path = None  # Track the saved screenshot path
+            
+            try:
+                # Configure context for better screenshot quality
+                context_options = {
+                    'viewport': {'width': 1280, 'height': 1600},  # Larger viewport to capture more content
+                    'device_scale_factor': 1,
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                }
+                
+                context = browser.new_context(**context_options)    
+                page = context.new_page()
+                
+                # Navigate to the repo and wait for content to load
+                logger.debug(f"Navigating to GitHub repo: {url}")
+                page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                
+                # Wait for content to be visible
+                page.wait_for_timeout(3000)  # Additional time for dynamic content
+                
+                # Create a unique filename for the screenshot
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                repo_parts = url.rstrip('/').split('/')
+                repo_identifier = f"{repo_parts[-2]}_{repo_parts[-1]}" if len(repo_parts) >= 2 else "unknown_repo"
+                screenshot_filename = f"github_{repo_identifier}_{timestamp}.png"
+                
+                # Prepare screenshot directory if saving is enabled
+                if save_screenshot:
+                    os.makedirs(screenshot_dir, exist_ok=True)
+                    screenshot_path = os.path.join(screenshot_dir, screenshot_filename)
+                    logger.info(f"Will save debug screenshot to: {screenshot_path}")
+
+                # Extract information through web scraping
+                logger.debug(f"Extracting GitHub repo content using CSS selectors")
+                
+                # 1. Extract repository statistics
+                stats = {}
+                
+                # Stars count
+                stars_elem = page.query_selector('a[href$="/stargazers"] .text-bold')
+                if stars_elem:
+                    stats['stars'] = stars_elem.inner_text().strip()
+                else:
+                    stats['stars'] = "0"
+                
+                # Forks count
+                forks_elem = page.query_selector('a[href$="/forks"] .text-bold')
+                if forks_elem:
+                    stats['forks'] = forks_elem.inner_text().strip()
+                else:
+                    stats['forks'] = "0"
+                
+                # Watching count
+                watching_elem = page.query_selector('a[href$="/watchers"] .text-bold')
+                if watching_elem:
+                    stats['watching'] = watching_elem.inner_text().strip()
+                else:
+                    stats['watching'] = "0"
+                
+                # 2. Extract repository title and description
+                repo_title = ""
+                title_elem = page.query_selector('strong[itemprop="name"] a')
+                if title_elem:
+                    repo_title = title_elem.inner_text().strip()
+                else:
+                    # Fallback to URL if title element not found
+                    repo_title = url.split('/')[-1]
+                
+                repo_description = ""
+                description_elem = page.query_selector('p.f4.mb-3')
+                if description_elem:
+                    repo_description = description_elem.inner_text().strip()
+                
+                # 3. Extract commit activity information
+                commit_message = ""
+                commit_date = ""
+                commit_count = "Unknown"
+                
+                # Last commit message
+                message_elem = page.query_selector('[data-testid="latest-commit-html"] a')
+                if message_elem:
+                    commit_message = message_elem.inner_text().strip()
+                
+                # Last commit date
+                date_elem = page.query_selector('[data-testid="latest-commit"] relative-time')
+                if date_elem:
+                    commit_date = date_elem.get_attribute('title') or date_elem.inner_text().strip()
+                
+                # Commit count using the specific XPath
+                try:
+                    xpath_selector = '//*[@id="repo-content-pjax-container"]/div/div/div/div[1]/react-partial/div/div/div[3]/div[1]/table/tbody/tr[1]/td/div/div[2]/div[2]/a/span/span[2]/span'
+                    commit_count_elem = page.query_selector(f"xpath={xpath_selector}")
+                    if commit_count_elem:
+                        commit_count = commit_count_elem.inner_text().strip()
+                        # Remove any text, keep only the number
+                        commit_count = ''.join(filter(str.isdigit, commit_count))
+                except Exception as e:
+                    logger.warning(f"Failed to extract commit count using XPath: {e}")
+                    # Fallback to previous method
+                    commit_elem = page.query_selector('a.Link--primary span.fgColor-default')
+                    if commit_elem and "Commits" in commit_elem.inner_text():
+                        commit_count = commit_elem.inner_text().split()[0].strip()
+                
+                # 4. Extract languages used
+                languages = []
+                lang_elements = page.query_selector_all('.d-inline .d-inline-flex.flex-items-center')
+                for lang_elem in lang_elements:
+                    lang_name = lang_elem.query_selector('.text-bold')
+                    if lang_name:
+                        languages.append(lang_name.inner_text().strip())
+                
+                # 5. Get README content for summary
+                readme_content = ""
+                readme_elem = page.query_selector('article.markdown-body')
+                if readme_elem:
+                    readme_content = readme_elem.inner_text()
+                
+                # Construct content_for_summary from all gathered information
+                content_for_summary = f"Title: {repo_title}  "
+                content_for_summary += f"Description: {repo_description}\n\n"
+                content_for_summary += f"Statistics:\n"
+                content_for_summary += f"- Stars: {stats.get('stars', '0')}\n"
+                content_for_summary += f"- Forks: {stats.get('forks', '0')}\n"
+                content_for_summary += f"- Watchers: {stats.get('watching', '0')}\n"
+                content_for_summary += f"Last Commit: {commit_message} ({commit_date})\n"
+                
+                if languages:
+                    content_for_summary += f"Languages: {', '.join(languages)}\n\n"
+                
+                content_for_summary += f"README Content:\n{readme_content}"
+                
+                # Create LLM prompt for summary generation
+                prompt = f"""
+    Based on the content_for_summary provided to you as follows, generate a concise summary (around 200 words) of this github project page.
+    Disregard whatever is related to the Github service itself. Consider only information related to the particular project this page points to.
+    ---
+    Repository Content:
+    {content_for_summary}
+    ---
+    """
+                
+                # Call text-based LLM for summary
+                logger.debug(f"Calling text model ({text_model}) for GitHub repo analysis")
+                summary = URLScraper.call_llm_completion(prompt, text_model, max_tokens=250)
+                
+                # Format the output according to requirements
+                technologies = ", ".join(languages) if languages else "Not specified"
+                commit_activity = f"{commit_count} commits, last commit on {commit_date}"
+                
+                formatted_output = f"""
+Title: {repo_title}  
+    
+Summary:   
+{summary}  
+
+Technologies: {technologies}  
+Forks: {stats.get('forks', '0')}  
+Stars: {stats.get('stars', '0')}  
+Commit Activity: {commit_activity}  
+"""
+                
+                # Update result with the formatted summary
+                result['content'] = formatted_output.strip()
+                result['extraction_method'] = 'github_web_scraping_with_llm'
+                logger.info(f"Successfully analyzed GitHub repo")
+                
+                # Save screenshot if enabled
+                if save_screenshot and screenshot_path:
+                    page.screenshot(path=screenshot_path)
+                    logger.debug(f"Saved screenshot to {screenshot_path}")
+                    
+            except PlaywrightTimeout as e:
+                logger.error(f"Timeout accessing GitHub repo {url}: {e}")
+                result['error'] = f"GitHub page load timeout: {e}"
+                result['content'] = "[Error: Timed out loading GitHub repository page]"
+                
+            except Exception as e:
+                logger.error(f"Unexpected error analyzing GitHub repo: {e}", exc_info=True)
+                result['error'] = f"Analysis error: {e}"
+                result['content'] = "[Error: Unexpected failure during GitHub analysis]"
+
+            finally:
+                # Clean up Playwright resources
+                if 'page' in locals():
+                    page.close()
+                if 'context' in locals():
+                    context.close()
+                    
+            return result
 
     @staticmethod
     def get_youtube_summary(details: Dict[str, Any], content_type: str, text_model: str) -> str:
@@ -986,13 +1209,13 @@ Summary:"""
                     final_url = page.url
                     if URLScraper.is_github_repo_url(final_url):
                         result['type'] = 'github'
-                        extraction_method = 'github_playwright_vision_model'
+                        extraction_method = 'github_playwright_llm_model'
                         logger.info("Processing as GitHub URL...")
                         # Simplified GitHub Extraction: Get Readme/About, Generate Summary
                         # repo_info = {'url': final_url, 'about': '', 'readme_text': '', 'stats': {}}
                         try:
                         # Extract "About"
-                            github_result = URLScraper.scrape_github_repo_with_vision(final_url, browser, vision_model)
+                            github_result = URLScraper.scrape_github_repo(final_url, browser, vision_model)
                             result.update(github_result)
                         except:
                             logger.error("Error during LLM github summarization")
