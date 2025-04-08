@@ -729,24 +729,42 @@ Commit Activity: {commit_activity}
 
     @staticmethod
     def filter_console_message(msg):
-        # Check if 'text' is a method or attribute
+        """
+        Safely filters console messages from Playwright to reduce noise.
+        Handles different message object structures that might be encountered.
+        """
+        # Safely extract text content from msg
+        msg_text = ''
         if hasattr(msg, 'text'):
-            if callable(msg.text):
-                msg_text = msg.text().lower()
+            if callable(getattr(msg, 'text', None)):
+                try:
+                    msg_text = msg.text()
+                except Exception:
+                    # Fallback if callable fails
+                    msg_text = str(msg.text)
             else:
-                msg_text = msg.text.lower()
+                msg_text = str(msg.text)
         else:
-            msg_text = ''
-            
-        # Same check for 'type'
+            # Try to convert the entire message to string if text attribute not found
+            msg_text = str(msg)
+        
+        # Safely extract message type
+        msg_type = ''
         if hasattr(msg, 'type'):
-            if callable(msg.type):
-                msg_type = msg.type().lower()
+            if callable(getattr(msg, 'type', None)):
+                try:
+                    msg_type = msg.type()
+                except Exception:
+                    # Fallback if callable fails
+                    msg_type = str(msg.type)
             else:
-                msg_type = msg.type.lower()
-        else:
-            msg_type = ''
+                msg_type = str(msg.type)
+        
+        # Convert to lowercase for case-insensitive comparison
+        msg_text = msg_text.lower()
+        msg_type = msg_type.lower()
 
+        # Filter out common noise
         ignore_patterns = [
             "Failed to load resource", "net::ERR_", "status of 403",
             "status of 404", "status of 429", "favicon.ico"
@@ -1027,23 +1045,52 @@ Commit Activity: {commit_activity}
         # Uses Playwright -> Pandoc -> LLM Summary / Search Fallback
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True, args=[ # Standard args
+                browser = p.chromium.launch(headless=True, args=[
                     '--disable-gpu', '--disable-dev-shm-usage', '--disable-setuid-sandbox', '--no-sandbox'
-                    ])
+                ])
                 context = browser.new_context(
-                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                     java_script_enabled=True, # Keep JS enabled for rendering, block resources instead
-                     # Block images/media/fonts for faster loading by default
-                     # Note: This was handled per-page before, context level is simpler
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    java_script_enabled=True, # Keep JS enabled for rendering, block resources instead
                 )
                 # Route to block resources at context level
-                context.route("**/*", lambda route: route.abort() if route.request.resource_type in ['image', 'stylesheet', 'font', 'media'] else route.continue_())
+                def route_handler(route):
+                    try:
+                        resource_type = route.request.resource_type
+                        if resource_type in ['image', 'stylesheet', 'font', 'media']:
+                            route.abort()
+                        else:
+                            route.continue_()
+                    except Exception as e:
+                        # If any error occurs, try to continue the request to avoid breaking page load
+                        try:
+                            route.continue_()
+                        except:
+                            # Last resort, just abort if we can't continue
+                            try:
+                                route.abort()
+                            except:
+                                pass
+
+                context.route("**/*", route_handler)
 
                 page = context.new_page()
-                 # Setup console/error logging
-                page.on("pageerror", lambda err: logger.warning(f"Page JS error ({cleaned_url}): {err}"))
-                page.on("console", lambda msg: print(f"Console [{msg.type()}]: {msg.text()}") if URLScraper.filter_console_message(msg) else None) # Conditional print
 
+                # Setup console/error logging
+                page.on("pageerror", lambda err: logger.warning(f"Page JS error ({cleaned_url}): {str(err)}"))
+
+                def safe_console_handler(msg):
+                    try:
+                        if URLScraper.filter_console_message(msg):
+                            # Get message text and type safely
+                            msg_text = str(msg.text) if not callable(getattr(msg, 'text', None)) else msg.text()
+                            msg_type = str(msg.type) if not callable(getattr(msg, 'type', None)) else msg.type()
+                            print(f"Console [{msg_type}]: {msg_text}")
+                    except Exception as e:
+                        # Silently fail if console handler has issues - don't let it break page loading
+                        pass
+
+                page.on("console", safe_console_handler)
+                #
                 extraction_method = "unknown"
                 try:
                     logger.debug(f"Navigating to generic URL: {cleaned_url}")
