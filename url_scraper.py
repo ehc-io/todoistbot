@@ -11,6 +11,8 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout, Error as PlaywrightError
 from litellm import litellm, completion
+from yt_extractor import YouTubeDataFetcher  # Import new YouTube module
+
 # litellm._turn_on_debug() # Keep commented unless debugging litellm
 
 import PyPDF2
@@ -658,7 +660,6 @@ Commit Activity: {commit_activity}
         else:
              return "Unknown YouTube content type."
 
-    # --- Keep Pandoc extraction ---
     @staticmethod
     def extract_content_with_pandoc(html: str) -> str:
         """Extract text content from HTML using Pandoc."""
@@ -691,7 +692,6 @@ Commit Activity: {commit_activity}
             logger.error(f"Error converting HTML with Pandoc: {str(e)}")
             return f"[Error: Pandoc conversion failed ({e})]"
 
-    # --- Keep Google Search fallback ---
     @staticmethod
     def get_url_info_from_search(url: str) -> Optional[str]:
         """Get information about a URL using Google Custom Search API."""
@@ -787,7 +787,6 @@ Commit Activity: {commit_activity}
         # Silence all other message types by default
         return False  # Don't log warnings, info, logs by default
 
-    # --- NEW process_twitter_content method ---
     @staticmethod
     def process_twitter_content(
         url: str,
@@ -971,6 +970,44 @@ Commit Activity: {commit_activity}
         logger.info(f"✓ Successfully processed Twitter URL: {url}")
         return result
 
+    @staticmethod
+    def format_youtube_content(video_details, comments, channel_details):
+        """
+        Format YouTube content with video details, comments, and channel info.
+        """
+        content_parts = []
+        
+        # Video Details
+        content_parts.append("Video Details:")
+        content_parts.append(f"Title: {video_details.get('title', 'N/A')}")
+        content_parts.append(f"Channel: {video_details.get('channel_title', 'N/A')}")
+        content_parts.append(f"Views: {video_details.get('view_count', 'N/A')}")
+        content_parts.append(f"Likes: {video_details.get('like_count', 'N/A')}")
+        content_parts.append(f"Duration: {video_details.get('duration', 'N/A')}")
+        content_parts.append(f"Has captions: {video_details.get('caption', False)}")
+        content_parts.append("--------------------------------------------------------------------------------")
+        
+        # Comments
+        if comments:
+            content_parts.append("Top 5 Comments:")
+            for i, comment in enumerate(comments, 1):
+                comment_text = comment.get('text', '')
+                # Truncate long comments
+                if len(comment_text) > 100:
+                    comment_text = comment_text[:97] + "..."
+                content_parts.append(f"{i}. {comment.get('author', 'Anonymous')}: {comment_text}")
+            content_parts.append("--------------------------------------------------------------------------------")
+        
+        # Channel Details
+        if channel_details:
+            content_parts.append("Channel Details:")
+            content_parts.append(f"Name: {channel_details.get('title', 'N/A')}")
+            content_parts.append(f"Subscribers: {channel_details.get('subscriber_count', 'N/A')}")
+            content_parts.append(f"Total Views: {channel_details.get('view_count', 'N/A')}")
+            content_parts.append(f"Total Videos: {channel_details.get('video_count', 'N/A')}")
+        
+        return "\n".join(content_parts)
+    
     # --- Updated scrape_url Method ---
     @staticmethod
     def scrape_url(
@@ -1005,6 +1042,29 @@ Commit Activity: {commit_activity}
                 )
             return twitter_result # Return directly, process_twitter_content handles format
 
+        # elif URLScraper.is_youtube_url(cleaned_url):
+        #     result['type'] = 'youtube'
+        #     youtube_api_key = os.getenv('YOUTUBE_DATA_API_KEY')
+        #     if not youtube_api_key:
+        #         logger.error("YOUTUBE_DATA_API_KEY not set. Cannot process YouTube URL.")
+        #         result['error'] = 'YouTube API key missing'
+        #         result['content'] = "[Error: YouTube API key not configured]"
+        #     else:
+        #         processor = YouTubeProcessor(youtube_api_key)
+        #         video_id = processor.extract_video_id(cleaned_url)
+        #         playlist_id = processor.extract_playlist_id(cleaned_url)
+
+        #         if video_id:
+        #             details = processor.get_video_details(video_id)
+        #             result['content'] = URLScraper.get_youtube_summary(details, 'video', text_model)
+        #         elif playlist_id:
+        #             details = processor.get_playlist_details(playlist_id)
+        #             result['content'] = URLScraper.get_youtube_summary(details, 'playlist', text_model)
+        #         else:
+        #             result['error'] = "Could not extract YouTube video or playlist ID."
+        #             result['content'] = "[Error: Invalid YouTube URL format]"
+        #     return result
+
         elif URLScraper.is_youtube_url(cleaned_url):
             result['type'] = 'youtube'
             youtube_api_key = os.getenv('YOUTUBE_DATA_API_KEY')
@@ -1013,21 +1073,42 @@ Commit Activity: {commit_activity}
                 result['error'] = 'YouTube API key missing'
                 result['content'] = "[Error: YouTube API key not configured]"
             else:
-                processor = YouTubeProcessor(youtube_api_key)
-                video_id = processor.extract_video_id(cleaned_url)
-                playlist_id = processor.extract_playlist_id(cleaned_url)
-
+                # Use the new YouTubeDataFetcher instead of YouTubeProcessor
+                fetcher = YouTubeDataFetcher(youtube_api_key)
+                
+                # Extract video ID
+                video_id = fetcher.extract_video_id(cleaned_url)
+                
                 if video_id:
-                    details = processor.get_video_details(video_id)
-                    result['content'] = URLScraper.get_youtube_summary(details, 'video', text_model)
-                elif playlist_id:
-                    details = processor.get_playlist_details(playlist_id)
-                    result['content'] = URLScraper.get_youtube_summary(details, 'playlist', text_model)
+                    # Get video details
+                    video_details = fetcher.get_video_details(video_id)
+                    
+                    if video_details:
+                        # Get comments if available
+                        comments = fetcher.get_video_comments(video_id, max_results=5)
+                        
+                        # Get channel details if available
+                        channel_details = None
+                        if video_details.get('channel_id'):
+                            channel_details = fetcher.get_channel_details(video_details.get('channel_id'))
+                        
+                        # Format the output
+                        formatted_content = URLScraper.format_youtube_content(video_details, comments, channel_details)
+                        result['content'] = formatted_content
+                        result['extraction_method'] = 'youtube_api'
+                        result['video_details'] = video_details  # Store details for more comprehensive reporting
+                        result['comments'] = comments            # Store comments
+                        result['channel_details'] = channel_details  # Store channel details
+                    else:
+                        result['error'] = "Failed to retrieve video details from YouTube API."
+                        result['content'] = "[Error: Could not fetch video details]"
                 else:
-                    result['error'] = "Could not extract YouTube video or playlist ID."
+                    # Handle as potential playlist
+                    # Keep compatibility with old API for playlists if needed
+                    result['error'] = "Could not extract YouTube video ID."
                     result['content'] = "[Error: Invalid YouTube URL format]"
             return result
-
+        
         elif URLScraper.is_pdf_url(cleaned_url):
             result['type'] = 'pdf'
             pdf_content = URLScraper.download_pdf(cleaned_url)
