@@ -26,6 +26,9 @@ from twitter_media_downloader import TwitterMediaDownloader
 # ---
 import logging # Ensure logging is configured if not already
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Suppress LiteLLM INFO logs
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # --- Existing YouTubeProcessor (No changes needed here unless API key handling changes) ---
@@ -730,8 +733,8 @@ Commit Activity: {commit_activity}
     @staticmethod
     def filter_console_message(msg):
         """
-        Safely filters console messages from Playwright to reduce noise.
-        Handles different message object structures that might be encountered.
+        Filters console messages from Playwright to reduce noise.
+        Returns True only for critical errors that should be logged.
         """
         # Safely extract text content from msg
         msg_text = ''
@@ -764,30 +767,25 @@ Commit Activity: {commit_activity}
         msg_text = msg_text.lower()
         msg_type = msg_type.lower()
 
-        # Filter out common noise
+        # Comprehensive list of patterns to ignore
         ignore_patterns = [
-            "Failed to load resource", "net::ERR_", "status of 403",
-            "status of 404", "status of 429", "favicon.ico"
+            "failed to load resource", "net::err_", "status of 403",
+            "status of 404", "status of 429", "favicon.ico",
+            "duplicate key", "devtools failed", "[tiktok]",
+            "unrecognized feature", "sandbox attribute", 
+            "cannot read properties", "falha de execu", "user preferences",
+            "web-share"
         ]
 
-        if any(pattern.lower() in msg_text for pattern in ignore_patterns):
-            return False # Silence common errors
-
-        # Silence specific noisy warnings (add more as needed)
-        if "Duplicate key 'aria-labelledby'" in msg_text: return False
-        if "DevTools failed to load source map" in msg_text: return False
-
-        # Log important types, filter others
-        if msg_type in ["error", "warning"]:
-            # Log JS errors and non-resource warnings
-            if "failed to load resource" not in msg_text:
-                return True # Log it
-            return False # Silence resource load errors/warnings
-        elif msg_type == "log":
-            # Decide if general logs are needed (can be very noisy)
-            return False # Silence general console.log messages by default
-        else:
-            return True # Log other types like 'info', 'debug' if they occur
+        # Only log critical errors that don't match any ignore patterns
+        if msg_type == "error":
+            if any(pattern in msg_text for pattern in ignore_patterns):
+                return False  # Ignore common errors
+            # Only return True for potentially important errors
+            return True  # Log critical errors not in our ignore list
+        
+        # Silence all other message types by default
+        return False  # Don't log warnings, info, logs by default
 
     # --- NEW process_twitter_content method ---
     @staticmethod
@@ -1080,13 +1078,14 @@ Commit Activity: {commit_activity}
 
                 def safe_console_handler(msg):
                     try:
+                        # Only process the message if filter_console_message returns True
                         if URLScraper.filter_console_message(msg):
                             # Get message text and type safely
                             msg_text = str(msg.text) if not callable(getattr(msg, 'text', None)) else msg.text()
                             msg_type = str(msg.type) if not callable(getattr(msg, 'type', None)) else msg.type()
-                            print(f"Console [{msg_type}]: {msg_text}")
+                            logger.warning(f"Critical browser error: {msg_text}")  # Use logger instead of print
                     except Exception as e:
-                        # Silently fail if console handler has issues - don't let it break page loading
+                        # Silently fail if console handler has issues
                         pass
 
                 page.on("console", safe_console_handler)
