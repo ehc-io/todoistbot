@@ -59,7 +59,7 @@ def get_api_key() -> str:
     return api_key
 
 # --- generate_markdown needs update to handle richer results ---
-def generate_markdown(tasks_data: List[dict]) -> str:
+def _generate_markdown(tasks_data: List[dict]) -> str:
     """
     Generate formatted markdown content from processed tasks data.
     """
@@ -133,6 +133,87 @@ def generate_markdown(tasks_data: List[dict]) -> str:
 
     return "\n".join(content)
 
+def generate_markdown(tasks_data: List[dict]) -> str:
+    """
+    Generate formatted markdown content from processed tasks data.
+    """
+    content = [
+        "# Todoist Capture Report",
+        f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "---",
+        "",
+    ]
+
+    # Filter out None values or tasks that resulted in errors without content
+    valid_tasks = [task for task in tasks_data if task and task.get('processed_urls')]
+
+    if not valid_tasks:
+        content.append("No tasks with successfully scraped content were processed in this run.")
+        return "\n".join(content)
+
+    for i, task_result in enumerate(valid_tasks):
+        task_content = task_result.get('original_task', {}).get('content', 'Unknown Task')
+        task_description = task_result.get('original_task', {}).get('description', '')
+        task_labels = task_result.get('original_task', {}).get('labels', [])
+
+        content.extend([
+            f"## Source: {task_content}",
+            ""
+        ])
+
+        # Original Description
+        if task_description:
+            content.extend([
+                "### Original Description",
+                f"> {task_description.replace(chr(10), chr(10) + '> ')}", # Blockquote description
+                ""
+            ])
+
+        # Labels
+        if task_labels:
+            content.extend([
+                "### Labels",
+                ", ".join([f"`{label}`" for label in task_labels]),
+                ""
+            ])
+
+        # Processed URL Content
+        content.append("### Scraped Content")
+        for url_data in task_result.get('processed_urls', []):
+            url = url_data.get('url', 'N/A')
+            scraped_content = url_data.get('content', '[No content extracted]')
+            content_type = url_data.get('type', 'unknown')
+            extraction_method = url_data.get('extraction_method', '') 
+            error = url_data.get('error')
+
+            content.append(f"**Source URL**: [{url}]({url})  ")
+            content.append(f"**Type**: {content_type.capitalize()}  ")
+            if extraction_method: 
+                content.append(f"*Extraction Method: {extraction_method}*  ")
+            content.append("")  # Extra spacing
+
+            if error:
+                content.append(f"**Error:** {error}")
+            elif scraped_content:
+                # For YouTube content, preserve formatting with code blocks
+                if content_type == 'youtube':
+                    content.append("```")
+                    content.append(scraped_content)
+                    content.append("```")
+                else:
+                    # For other content types, use blockquotes
+                    content.append(f"> {scraped_content.replace(chr(10), chr(10) + '> ')}")
+            else:
+                content.append("[No content or error reported for this URL]")
+
+            content.append("") # Spacer after each URL's content
+
+        content.extend([
+            "---", # Use --- instead of page break for better markdown compatibility
+            ""
+        ])
+
+    return "\n".join(content)
 
 def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
     """
