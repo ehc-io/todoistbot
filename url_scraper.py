@@ -421,7 +421,7 @@ Summary:"""
             url: str, 
             browser, 
             text_model: str,
-            save_screenshot: bool = True,  # Parameter to control screenshot saving
+            save_screenshot: bool = False,  # Parameter to control screenshot saving
             screenshot_dir: str = "screenshots"  # Default directory for saved screenshots
         ) -> Dict[str, Any]:
             """
