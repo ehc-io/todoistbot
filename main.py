@@ -116,6 +116,8 @@ def generate_markdown(tasks_data: List[dict]) -> str:
             content.append(f"**Type**: {content_type.capitalize()}  ")
             if extraction_method: 
                 content.append(f"*Extraction Method: {extraction_method}*  ")
+                content.append("  ")  # Spacer after each URL's content
+                # content.append("---")  # Separator for each URL
             
             # Add downloaded video info if available
             if downloaded_video:

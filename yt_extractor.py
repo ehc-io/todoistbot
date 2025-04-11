@@ -852,13 +852,13 @@ def enhance_youtube_processing(
         
         # Format content
         content_parts = [
-            f"Title: {video_details.get('title', 'N/A')}",
-            f"Channel: {video_details.get('channel_title', 'N/A')}",
-            f"Views: {video_details.get('view_count', 'N/A')}",
-            f"Likes: {video_details.get('like_count', 'N/A')}",
-            f"Duration: {video_details.get('duration', 'N/A')}",
+            f"Title: {video_details.get('title', 'N/A')}  ",
+            "---",
+            f"Views: {video_details.get('view_count', 'N/A')}  ",
+            f"Likes: {video_details.get('like_count', 'N/A')}  ",
+            f"Duration: {video_details.get('duration', 'N/A')}  ",
             f"Has captions: {video_details.get('caption', False)}  ",
-            "   "
+            "   ",
             "---",
         ]
         if channel_details:
@@ -868,13 +868,15 @@ def enhance_youtube_processing(
             content_parts.append(f"Total Views: {channel_details.get('view_count', 'N/A')}  ")
             content_parts.append(f"Total Videos: {channel_details.get('video_count', 'N/A')}  ")
             content_parts.append("  ")
-            content_parts.append("--")
+            content_parts.append("---")
 
         # Transcript section
         if transcript_text:
             content_parts.append(f"Full transcript length: {len(transcript_text)} characters  ")
+            content_parts.append("  ")
             if transcript_summary:
                 content_parts.append(f"Transcript Summary: {transcript_summary}  ")
+                content_parts.append("  ")
         else:
             content_parts.append("Transcript: Not available")
         
