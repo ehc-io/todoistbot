@@ -14,6 +14,16 @@ from youtube_transcript_api._errors import NoTranscriptFound
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+# Import boto3 for S3 uploads
+try:
+    import boto3
+    from botocore.exceptions import NoCredentialsError, ClientError
+    S3_AVAILABLE = True
+except ImportError:
+    S3_AVAILABLE = False
+    print("Warning: boto3 is not installed. S3 upload functionality will be disabled.")
+    print("Install with: pip install boto3")
+
 # Import pytubefix for video downloads
 try:
     from pytubefix import YouTube, Playlist, Channel
@@ -61,6 +71,11 @@ class YouTubeDataFetcher:
         self.use_drive = False
         self.drive_service = None
         
+        # S3 configuration
+        self.use_s3 = False
+        self.s3_bucket = None
+        self.s3_client = None
+        
         # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
         
@@ -68,6 +83,177 @@ class YouTubeDataFetcher:
         if api_key:
             self.initialize_youtube_client()
         
+    def configure_s3(self, bucket_name: str, region_name: str = None) -> bool:
+        """Configure S3 upload functionality.
+        
+        Args:
+            bucket_name: S3 bucket name for uploads
+            region_name: AWS region name (default: None, will use environment variables)
+            
+        Returns:
+            True if configuration successful, False otherwise
+        """
+        if not S3_AVAILABLE:
+            logger.error("boto3 is not installed. Cannot configure S3 uploads.")
+            return False
+            
+        try:
+            # Use provided region or fall back to environment variables
+            self.s3_client = boto3.client('s3', region_name=region_name)
+            self.s3_bucket = bucket_name
+            self.use_s3 = True
+            
+            # Test bucket access
+            self.s3_client.head_bucket(Bucket=bucket_name)
+            logger.info(f"Successfully configured S3 uploads to bucket: {bucket_name} in region: {region_name or 'default'}")
+            return True
+        except NoCredentialsError:
+            logger.error("AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.")
+            self.use_s3 = False
+            return False
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            if error_code == '404':
+                logger.error(f"S3 bucket {bucket_name} does not exist")
+            elif error_code == '403':
+                logger.error(f"Access denied to S3 bucket {bucket_name}")
+            else:
+                logger.error(f"S3 bucket access error: {str(e)}")
+            self.use_s3 = False
+            return False
+        except Exception as e:
+            logger.error(f"Error configuring S3: {str(e)}")
+            self.use_s3 = False
+            return False
+    
+    def upload_to_s3(self, local_file_path: str, object_name: Optional[str] = None) -> Optional[str]:
+        """Upload a file to S3 bucket.
+        
+        Args:
+            local_file_path: Path to local file to upload
+            object_name: S3 object name. If not specified, file name is used
+            
+        Returns:
+            S3 object URL if successful, None otherwise
+        """
+        if not self.use_s3 or not self.s3_client:
+            logger.error("S3 is not configured for uploads")
+            return None
+            
+        # If object_name not specified, use file name from local_file_path
+        if object_name is None:
+            object_name = os.path.basename(local_file_path)
+            
+        # Use week number of the year (ISO week date format: week starts on Monday, ends on Sunday)
+        from datetime import datetime
+        current_date = datetime.now()
+        # Get ISO week number (1-53)
+        week_of_year = current_date.isocalendar()[1]
+        
+        # Create week-based folder structure: 'week_XX' where XX is the week number
+        folder_name = f"week_{week_of_year:02d}"
+        
+        # Final object path: week_XX/filename
+        object_name = f"{folder_name}/{object_name}"
+            
+        try:
+            logger.info(f"Uploading {local_file_path} to S3 bucket {self.s3_bucket}, folder: {folder_name}")
+            self.s3_client.upload_file(local_file_path, self.s3_bucket, object_name)
+            s3_url = f"https://{self.s3_bucket}.s3.amazonaws.com/{object_name}"
+            logger.info(f"S3 upload successful: {s3_url}")
+            return s3_url
+        except NoCredentialsError:
+            logger.error("AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.")
+            return None
+        except ClientError as e:
+            logger.error(f"S3 upload error: {str(e)}")
+            return None
+        except Exception as e:
+            logger.error(f"Error during S3 upload: {str(e)}")
+            return None
+    
+    def direct_upload_to_s3(self, video_id: str, video_title: str) -> Optional[str]:
+        """Create a reference file in S3 for a YouTube video without downloading it first.
+        
+        Args:
+            video_id: YouTube video ID
+            video_title: The title of the video for naming
+            
+        Returns:
+            S3 object URL if successful, None otherwise
+        """
+        if not self.use_s3 or not self.s3_client:
+            logger.error("S3 is not configured for uploads")
+            return None
+        
+        try:
+            # Use week number of the year (ISO week date format: week starts on Monday, ends on Sunday)
+            from datetime import datetime
+            import json
+            
+            current_date = datetime.now()
+            timestamp = int(time.time())
+            # Get ISO week number (1-53)
+            week_of_year = current_date.isocalendar()[1]
+            
+            # Create week-based folder structure: 'week_XX' where XX is the week number
+            folder_name = f"week_{week_of_year:02d}"
+            
+            # Clean the title for a safe filename
+            clean_title = self.clean_title(video_title)
+            
+            # Create the reference file name
+            filename = f"{timestamp}_{clean_title}_reference.json"
+            
+            # Create a reference JSON file with video details
+            reference_data = {
+                "youtube_video_id": video_id,
+                "title": video_title,
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "processed_at": timestamp,
+                "reference_type": "youtube_video",
+                "direct_embed_url": f"https://www.youtube.com/embed/{video_id}"
+            }
+            
+            # Create temporary file
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
+                json.dump(reference_data, temp_file, indent=4)
+                temp_file_path = temp_file.name
+            
+            # Final object path: week_XX/filename
+            object_name = f"{folder_name}/{filename}"
+            
+            try:
+                logger.info(f"Creating S3 reference for YouTube video {video_id} in bucket {self.s3_bucket}, folder: {folder_name}")
+                self.s3_client.upload_file(temp_file_path, self.s3_bucket, object_name)
+                s3_url = f"https://{self.s3_bucket}.s3.amazonaws.com/{object_name}"
+                logger.info(f"S3 reference creation successful: {s3_url}")
+                
+                # Remove the temporary file
+                os.unlink(temp_file_path)
+                
+                return s3_url
+            except NoCredentialsError:
+                logger.error("AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.")
+                # Make sure to clean up the temp file
+                os.unlink(temp_file_path)
+                return None
+            except ClientError as e:
+                logger.error(f"S3 upload error: {str(e)}")
+                # Make sure to clean up the temp file
+                os.unlink(temp_file_path)
+                return None
+            except Exception as e:
+                logger.error(f"Error during S3 reference creation: {str(e)}")
+                # Make sure to clean up the temp file
+                os.unlink(temp_file_path)
+                return None
+            
+        except Exception as e:
+            logger.error(f"Error preparing S3 reference file: {str(e)}")
+            return None
+    
     @staticmethod
     def extract_video_id(youtube_url: str) -> Optional[str]:
         """Extract the video ID from a YouTube URL.
@@ -555,10 +741,13 @@ class YouTubeDataFetcher:
         
         # Only update progress every 5%
         current_progress = int(percentage / 5) * 5
-        video_id = stream.video_id
         
-        if video_id not in self.download_progress_shown or current_progress > self.download_progress_shown[video_id]:
-            self.download_progress_shown[video_id] = current_progress
+        # Instead of using video_id which doesn't exist on stream objects,
+        # use a simple string key or the stream's itag as an identifier
+        stream_key = str(stream.itag)
+        
+        if stream_key not in self.download_progress_shown or current_progress > self.download_progress_shown[stream_key]:
+            self.download_progress_shown[stream_key] = current_progress
             sys.stdout.write(f"\rProgress: {percentage:.2f}%")
             sys.stdout.flush()
     
@@ -582,6 +771,7 @@ class YouTubeDataFetcher:
             'video_id': None,
             'title': None,
             'filepath': None,
+            's3_url': None,
             'error': None
         }
         
@@ -624,12 +814,28 @@ class YouTubeDataFetcher:
                 result['error'] = error_msg
                 return result
                 
-            # Download the video
-            stream.download(output_path=self.output_dir, filename=filename)
-            logger.info(f"Successfully downloaded: {full_path}")
-            
-            result['success'] = True
-            result['filepath'] = full_path
+            # Download the video with error handling for progress callback issues
+            try:
+                stream.download(output_path=self.output_dir, filename=filename)
+                logger.info(f"Successfully downloaded: {full_path}")
+                
+                result['success'] = True
+                result['filepath'] = full_path
+                
+                # Upload to S3 if configured
+                if self.use_s3 and os.path.exists(full_path):
+                    s3_url = self.upload_to_s3(full_path)
+                    if s3_url:
+                        result['s3_url'] = s3_url
+                        logger.info(f"Successfully uploaded video to S3: {s3_url}")
+                    else:
+                        logger.warning("Failed to upload video to S3")
+            except Exception as download_error:
+                error_msg = f"Error during download: {str(download_error)}"
+                logger.error(error_msg)
+                result['error'] = error_msg
+                return result
+                    
             return result
             
         except Exception as e:
@@ -760,7 +966,10 @@ def enhance_youtube_processing(
     url: str, 
     text_model: str,
     download_youtube_video: bool = False,
-    youtube_output_dir: str = "./downloads"
+    youtube_output_dir: str = "./downloads",
+    s3_upload: bool = False,
+    s3_bucket: str = None,
+    s3_region: str = None
 ) -> dict:
     """
     Enhanced YouTube processing using YouTubeDataFetcher from yt_extractor.py
@@ -770,6 +979,9 @@ def enhance_youtube_processing(
         text_model: Text model for summarization
         download_youtube_video: Whether to download the video
         youtube_output_dir: Output directory for downloaded videos
+        s3_upload: Whether to upload videos to S3
+        s3_bucket: S3 bucket name for uploads
+        s3_region: AWS region for S3 uploads (defaults to AWS_REGION environment variable)
         
     Returns:
         Dictionary with processed YouTube data
@@ -792,6 +1004,19 @@ def enhance_youtube_processing(
     try:
         # Initialize YouTubeDataFetcher
         fetcher = YouTubeDataFetcher(youtube_api_key, output_dir=youtube_output_dir)
+        
+        # Configure S3 if requested
+        if s3_upload and s3_bucket:
+            if not S3_AVAILABLE:
+                logger.warning("S3 upload requested but boto3 is not installed. Install with: pip install boto3")
+                result['error'] = 'S3 upload requested but boto3 is not installed'
+            else:
+                logger.info(f"Configuring S3 upload to bucket: {s3_bucket} in region: {s3_region or 'default'}")
+                s3_configured = fetcher.configure_s3(s3_bucket, region_name=s3_region)
+                if not s3_configured:
+                    logger.warning("Failed to configure S3 upload")
+                    # Continue processing but note the error
+                    result['error'] = 'Failed to configure S3 upload'
         
         # Extract video ID
         video_id = fetcher.extract_video_id(url)
@@ -834,9 +1059,12 @@ def enhance_youtube_processing(
             logger.warning(f"Failed to get transcript for video ID {video_id}: {e}")
             # Continue processing even if transcript fails
         
-        # Download video if requested
+        # Handle video download and/or S3 upload based on flags
         downloaded_video_path = None
+        s3_url = None
+        
         if download_youtube_video:
+            # Download video
             try:
                 logger.info(f"Downloading YouTube video: {url}")
                 download_result = fetcher.download_video(url)
@@ -844,11 +1072,29 @@ def enhance_youtube_processing(
                     downloaded_video_path = download_result.get('filepath')
                     result['downloaded_video_path'] = downloaded_video_path
                     logger.info(f"Successfully downloaded video to: {downloaded_video_path}")
+                    
+                    # Add S3 URL if available (this happens automatically if S3 is configured)
+                    if download_result.get('s3_url'):
+                        s3_url = download_result.get('s3_url')
+                        result['s3_url'] = s3_url
+                        logger.info(f"Successfully uploaded downloaded video to S3: {s3_url}")
                 else:
                     error_msg = download_result.get('error') if download_result else "Unknown download error"
                     logger.warning(f"Failed to download video: {error_msg}")
             except Exception as e:
                 logger.error(f"Error during video download: {e}")
+        elif s3_upload:
+            # Create S3 reference without downloading
+            try:
+                logger.info(f"Creating S3 reference for YouTube video without downloading: {url}")
+                s3_url = fetcher.direct_upload_to_s3(video_id, video_details.get('title', 'Unknown'))
+                if s3_url:
+                    result['s3_url'] = s3_url
+                    logger.info(f"Successfully created S3 reference for video: {s3_url}")
+                else:
+                    logger.warning(f"Failed to create S3 reference for video: {url}")
+            except Exception as e:
+                logger.error(f"Error creating S3 reference: {e}")
         
         # Format content
         content_parts = [
@@ -931,6 +1177,15 @@ def parse_arguments():
                               help='Download video(s)')
     download_group.add_argument('--threads', type=int, default=2,
                               help='Number of concurrent downloads (default: 2)')
+    
+    # S3 upload options
+    s3_group = parser.add_argument_group('S3 Upload Options')
+    s3_group.add_argument('--upload-to-s3', action='store_true',
+                          help='Upload downloaded videos to S3')
+    s3_group.add_argument('--s3-bucket', type=str, default=None,
+                          help='S3 bucket name for uploads')
+    s3_group.add_argument('--s3-region', type=str, default=None, 
+                          help='AWS region for S3 uploads (defaults to AWS_REGION environment variable)')
     
     return parser.parse_args()
 
@@ -1044,3 +1299,31 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# Test function for the progress_callback fix
+def test_progress_callback():
+    """Test the progress_callback method with a mock stream object."""
+    print("Running progress_callback test...")
+    
+    class MockStream:
+        def __init__(self):
+            self.filesize = 1000
+            self.itag = 22  # Common YouTube itag
+            # Note: deliberately not setting video_id to test our fix
+    
+    fetcher = YouTubeDataFetcher(api_key=None)  # No API key needed for this test
+    mock_stream = MockStream()
+    
+    # This should work without errors now
+    try:
+        fetcher.progress_callback(mock_stream, b"chunk", 500)  # 50% downloaded
+        print("Progress callback test passed!")
+        return True
+    except Exception as e:
+        print(f"Progress callback test failed with error: {e}")
+        return False
+
+# Allow running this test directly
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "test":
+    success = test_progress_callback()
+    print(f"Test result: {'PASS' if success else 'FAIL'}")

@@ -111,6 +111,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
             
             # Add downloaded video information if available
             downloaded_video = url_data.get('downloaded_video_path', '')
+            s3_url = url_data.get('s3_url', '')
 
             content.append(f"**URL**: [{url}]({url})  ")
             content.append(f"**Type**: {content_type.capitalize()}  ")
@@ -121,7 +122,18 @@ def generate_markdown(tasks_data: List[dict]) -> str:
             
             # Add downloaded video info if available
             if downloaded_video:
-                content.append(f"**Downloaded Video**: {downloaded_video}")
+                content.append(f"**Local Folder**: {downloaded_video}  ")
+            
+            # Add S3 URL if available
+            if s3_url:
+                # Extract week folder from s3_url (format: week_XX)
+                week_folder = "Unknown Week"
+                match = re.search(r'week_(\d+)', s3_url)
+                if match:
+                    week_folder = f"Week {match.group(1)}"
+                
+                content.append(f"**S3 Location**: [{s3_url}]({s3_url})  ")
+                # content.append(f"**S3 Folder Structure**: {week_folder}  ")
                 
             content.append("")  # Extra spacing
 
@@ -143,7 +155,7 @@ def custom_scrape_url(
     text_model: str = "ollama/llama3.2:3b",
     vision_model: str = "ollama/llava:7b",
     download_media: bool = False,
-    media_output_dir: str = "./downloads",
+    media_output_dir: str = "downloads",
     use_search_fallback: bool = True
 ) -> Optional[Dict[str, Any]]:
     """
@@ -227,7 +239,9 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                     url, 
                     text_model=args.text_model,
                     download_youtube_video=args.download_youtube_videos,
-                    youtube_output_dir=args.youtube_output_dir
+                    youtube_output_dir=args.youtube_output_dir,
+                    s3_upload=args.upload_to_s3,
+                    s3_bucket=args.s3_bucket
                 )
                 
                 # Remember this video ID to avoid reprocessing
@@ -239,6 +253,9 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                     any_scrape_successful = True
                     if youtube_result.get('downloaded_video_path'):
                         logger.info(f"  ✓ Successfully processed and downloaded video for: {url}")
+                    
+                    if youtube_result.get('s3_url'):
+                        logger.info(f"  ✓ Successfully uploaded video to S3: {youtube_result.get('s3_url')}")
                     else:
                         logger.info(f"  ✓ Successfully processed YouTube URL: {url}")
                 else:
@@ -320,11 +337,15 @@ def main():
     
     # Twitter media download args
     parser.add_argument('--download-twitter-media', action='store_true', help='Download media from successfully processed Twitter/X links')
-    parser.add_argument('--twitter-media-output', type=str, default='./downloads', help='Output directory for Twitter/X media downloads')
+    parser.add_argument('--twitter-media-output', type=str, default='downloads', help='Output directory for Twitter/X media downloads')
     
     # Add YouTube video download args (similar to Twitter media)
-    parser.add_argument('--download-youtube-videos', action='store_true', help='Download videos from successfully processed YouTube links')
-    parser.add_argument('--youtube-output-dir', type=str, default='./downloads', help='Output directory for YouTube video downloads')
+    parser.add_argument('--download-youtube-videos', action='store_true', help='Download videos from successfully processed YouTube links to local storage')
+    parser.add_argument('--youtube-output-dir', type=str, default='downloads', help='Output directory for YouTube video downloads')
+    
+    # Add S3 upload options
+    parser.add_argument('--upload-to-s3', action='store_true', help='Create S3 references for YouTube videos (works with or without local download)')
+    parser.add_argument('--s3-bucket', type=str, default='2025-captured-notes', help='S3 bucket name for YouTube reference uploads')
     
     # Search fallback control
     parser.add_argument('--no-search-fallback', action='store_true', help='Disable Google Search fallback for failed extractions')
@@ -353,6 +374,18 @@ def main():
     if args.download_youtube_videos:
         Path(args.youtube_output_dir).mkdir(parents=True, exist_ok=True)
         logger.info(f"YouTube video download enabled. Output directory: {args.youtube_output_dir}")
+        
+    # --- Check S3 settings ---
+    if args.upload_to_s3:
+        try:
+            import boto3
+            if args.download_youtube_videos:
+                logger.info(f"S3 upload enabled for downloaded videos. Bucket: {args.s3_bucket}")
+            else:
+                logger.info(f"S3 reference creation enabled (without local download). Bucket: {args.s3_bucket}")
+        except ImportError:
+            logger.error("Error: boto3 not installed. Install with: pip install boto3")
+            return 1
 
     try:
         api = TodoistAPI(get_api_key())
