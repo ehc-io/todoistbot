@@ -10,10 +10,8 @@ import pypandoc
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout, Error as PlaywrightError
-from litellm import litellm, completion
 from yt_extractor import YouTubeDataFetcher  # Import new YouTube module
-
-# litellm._turn_on_debug() # Keep commented unless debugging litellm
+from common import call_llm_completion
 
 import PyPDF2
 from io import BytesIO
@@ -28,8 +26,7 @@ from twitter_media_downloader import TwitterMediaDownloader
 # ---
 import logging # Ensure logging is configured if not already
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-# Suppress LiteLLM INFO logs
-logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
 
 logger = logging.getLogger(__name__)
 
@@ -344,37 +341,6 @@ class URLScraper:
 
     # --- Keep LLM summarization methods ---
     @staticmethod
-    def call_llm_completion(prompt: str, text_model: str, max_tokens: int = 250) -> str:
-         """Helper function to call the LLM completion API."""
-         try:
-             messages = [{"content": prompt, "role": "user"}]
-             # Use context manager for potential temporary env var setting if needed
-             # with litellm.utils.set_verbose(False): # Reduce litellm verbosity if desired
-             response = completion(
-                 model=text_model,
-                 messages=messages,
-                 max_tokens=max_tokens, # Limit output size
-                 temperature=0.5, # Lower temperature for factual summary
-                 # Add other parameters like top_p if needed
-             )
-             # Accessing content correctly for LiteLLM v1+
-             if response.choices and response.choices[0].message and response.choices[0].message.content:
-                  summary = response.choices[0].message.content.strip()
-                  # Optional: Post-process summary (remove boilerplate, etc.)
-                  return summary
-             else:
-                  logger.warning(f"LLM response structure invalid or content missing. Response: {response}")
-                  return "Summary generation failed (Invalid LLM response)."
-
-         except Exception as e:
-             # Catch specific LiteLLM errors if possible
-             logger.error(f"Error calling LLM ({text_model}) for summary: {e}")
-             # Log traceback for detailed debugging if needed
-             # import traceback
-             # logger.error(traceback.format_exc())
-             return f"Error generating summary: {e}"
-
-    @staticmethod
     def get_webpage_summary(text: str, text_model: str = "ollama/llama3.2:3b") -> str:
         """Get summary of webpage content using LLM."""
         if not text: return "No content to summarize."
@@ -386,15 +352,8 @@ class URLScraper:
             text = text[:max_chars] + "..."
             logger.debug(f"Truncated webpage text to {max_chars} chars for summarization.")
 
-        prompt = f"""Please provide a concise summary (around 100 words) of the following webpage content. Focus on the main topic, key points, and conclusions.
-
-Webpage Content:
-\"\"\"
-{text}
-\"\"\"
-
-Summary:"""
-        return URLScraper.call_llm_completion(prompt, text_model, max_tokens=150)
+        prompt = open("prompts/webpage").read().strip() + "\nWEBPAGE CONTENT:\n" + text
+        return call_llm_completion(prompt, text_model)
 
     @staticmethod
     def get_pdf_summary(text: str, text_model: str = "ollama/llama3.2:3b") -> str:
@@ -407,15 +366,8 @@ Summary:"""
             text = text[:max_chars] + "..."
             logger.debug(f"Truncated PDF text to {max_chars} chars for summarization.")
 
-        prompt = f"""Please provide a concise summary (around 100 words) of the following document content, likely from a PDF. Focus on the main topic, key findings, arguments, or purpose.
-
-Document Content:
-\"\"\"
-{text}
-\"\"\"
-
-Summary:"""
-        return URLScraper.call_llm_completion(prompt, text_model, max_tokens=150)
+        prompt = open("prompts/pdf_doc").read().strip() + "\nPDF CONTENT:\n" + text
+        return call_llm_completion(prompt, text_model)
 
     def scrape_github_repo(
             url: str, 
@@ -570,18 +522,11 @@ Summary:"""
                 content_for_summary += f"README Content:\n{readme_content}"
                 
                 # Create LLM prompt for summary generation
-                prompt = f"""
-    Based on the content_for_summary provided to you as follows, generate a concise summary (around 200 words) of this github project page.
-    Disregard whatever is related to the Github service itself. Consider only information related to the particular project this page points to.
-    ---
-    Repository Content:
-    {content_for_summary}
-    ---
-    """
+                prompt = open("prompts/github_repo", "r").read().strip() + f"\nGITHUB REPO CONTENT:\n" + content_for_summary
                 
                 # Call text-based LLM for summary
                 logger.debug(f"Calling text model ({text_model}) for GitHub repo analysis")
-                summary = URLScraper.call_llm_completion(prompt, text_model, max_tokens=250)
+                summary = call_llm_completion(prompt, text_model)
                 
                 # Format the output according to requirements
                 technologies = ", ".join(languages) if languages else "Not specified"
@@ -1041,29 +986,6 @@ Commit Activity: {commit_activity}
                 media_output_dir=media_output_dir
                 )
             return twitter_result # Return directly, process_twitter_content handles format
-
-        # elif URLScraper.is_youtube_url(cleaned_url):
-        #     result['type'] = 'youtube'
-        #     youtube_api_key = os.getenv('YOUTUBE_DATA_API_KEY')
-        #     if not youtube_api_key:
-        #         logger.error("YOUTUBE_DATA_API_KEY not set. Cannot process YouTube URL.")
-        #         result['error'] = 'YouTube API key missing'
-        #         result['content'] = "[Error: YouTube API key not configured]"
-        #     else:
-        #         processor = YouTubeProcessor(youtube_api_key)
-        #         video_id = processor.extract_video_id(cleaned_url)
-        #         playlist_id = processor.extract_playlist_id(cleaned_url)
-
-        #         if video_id:
-        #             details = processor.get_video_details(video_id)
-        #             result['content'] = URLScraper.get_youtube_summary(details, 'video', text_model)
-        #         elif playlist_id:
-        #             details = processor.get_playlist_details(playlist_id)
-        #             result['content'] = URLScraper.get_youtube_summary(details, 'playlist', text_model)
-        #         else:
-        #             result['error'] = "Could not extract YouTube video or playlist ID."
-        #             result['content'] = "[Error: Invalid YouTube URL format]"
-        #     return result
 
         elif URLScraper.is_youtube_url(cleaned_url):
             result['type'] = 'youtube'

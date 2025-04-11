@@ -4,13 +4,15 @@ import re
 import sys
 import argparse
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from todoist_api_python.api import TodoistAPI
 from datetime import datetime
 from pathlib import Path # Use pathlib for paths
 
 # --- Import the refactored scraper ---
 from url_scraper import URLScraper
+# --- Import the YouTube extractor directly ---
+from yt_extractor import YouTubeDataFetcher, get_transcript_summary, enhance_youtube_processing
 # ---
 
 import logging # Ensure logging is used
@@ -18,7 +20,6 @@ import logging # Ensure logging is used
 # Configure logging for main script
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("main")
-
 
 class TaskStats:
     def __init__(self):
@@ -39,7 +40,6 @@ class TaskStats:
         print(f"Tasks remaining in 'Capture':      {self.tasks_remaining_in_capture}")
         print("==============================")
 
-
 class URLExtractor:
     """Uses the static methods from URLScraper"""
     @staticmethod
@@ -51,87 +51,11 @@ class URLExtractor:
         # Optional: Add more filtering here if needed (e.g., ignore certain domains)
         return [url for url in raw_urls if URLScraper.is_valid_url(url)]
 
-
 def get_api_key() -> str:
     api_key = os.getenv('TODOIST_API_KEY')
     if not api_key:
         raise ValueError("TODOIST_API_KEY environment variable not set")
     return api_key
-
-# --- generate_markdown needs update to handle richer results ---
-def _generate_markdown(tasks_data: List[dict]) -> str:
-    """
-    Generate formatted markdown content from processed tasks data.
-    """
-    content = [
-        "# Todoist Capture Report",
-        f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "---",
-        "",
-    ]
-
-    # Filter out None values or tasks that resulted in errors without content
-    valid_tasks = [task for task in tasks_data if task and task.get('processed_urls')]
-
-    if not valid_tasks:
-        content.append("No tasks with successfully scraped content were processed in this run.")
-        return "\n".join(content)
-
-    for i, task_result in enumerate(valid_tasks):
-        task_content = task_result.get('original_task', {}).get('content', 'Unknown Task')
-        task_description = task_result.get('original_task', {}).get('description', '')
-        task_labels = task_result.get('original_task', {}).get('labels', [])
-
-        content.extend([
-            f"## Source: {task_content}",
-            ""
-        ])
-
-        # Original Description
-        if task_description:
-            content.extend([
-                "### Original Description",
-                f"> {task_description.replace(chr(10), chr(10) + '> ')}", # Blockquote description
-                ""
-            ])
-
-        # Labels
-        if task_labels:
-            content.extend([
-                "### Labels",
-                ", ".join([f"`{label}`" for label in task_labels]),
-                ""
-            ])
-
-        # Processed URL Content
-        # content.append("### Scraped Content")
-        for url_data in task_result.get('processed_urls', []):
-             url = url_data.get('url', 'N/A')
-             scraped_content = url_data.get('content', '[No content extracted]')
-             content_type = url_data.get('type', 'unknown')
-             extraction_method = url_data.get('extraction_method', '') # e.g., pandoc_llm, google_search
-             error = url_data.get('error')
-
-            #  content.append(f"**Source URL**: [{content_type}]({url})  ")
-            #  content.append("---  ")
-             if extraction_method: content.append(f"*Extraction Method: {extraction_method}*  ")
-
-             if error:
-                 content.append(f"**Error:** {error}")
-             elif scraped_content:
-                 # Add blockquote for scraped content for visual separation
-                 content.append(f"{scraped_content}  ")
-             else:
-                 content.append("No content or error reported for this URL]")
-
-             content.append("") # Spacer after each URL's content
-
-        content.extend([
-            "---", # Use --- instead of page break for better markdown compatibility
-            ""
-        ])
-
-    return "\n".join(content)
 
 def generate_markdown(tasks_data: List[dict]) -> str:
     """
@@ -157,7 +81,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
         task_labels = task_result.get('original_task', {}).get('labels', [])
 
         content.extend([
-            f"## Source: {task_content}",
+            f"## {task_content}",
             ""
         ])
 
@@ -178,42 +102,73 @@ def generate_markdown(tasks_data: List[dict]) -> str:
             ])
 
         # Processed URL Content
-        content.append("### Scraped Content")
         for url_data in task_result.get('processed_urls', []):
             url = url_data.get('url', 'N/A')
             scraped_content = url_data.get('content', '[No content extracted]')
             content_type = url_data.get('type', 'unknown')
             extraction_method = url_data.get('extraction_method', '') 
             error = url_data.get('error')
+            
+            # Add downloaded video information if available
+            downloaded_video = url_data.get('downloaded_video_path', '')
 
-            content.append(f"**Source URL**: [{url}]({url})  ")
+            content.append(f"**URL**: [{url}]({url})  ")
             content.append(f"**Type**: {content_type.capitalize()}  ")
             if extraction_method: 
                 content.append(f"*Extraction Method: {extraction_method}*  ")
+            
+            # Add downloaded video info if available
+            if downloaded_video:
+                content.append(f"**Downloaded Video**: {downloaded_video}")
+                
             content.append("")  # Extra spacing
 
             if error:
                 content.append(f"**Error:** {error}")
-            elif scraped_content:
-                # For YouTube content, preserve formatting with code blocks
-                if content_type == 'youtube':
-                    content.append("```")
-                    content.append(scraped_content)
-                    content.append("```")
-                else:
-                    # For other content types, use blockquotes
-                    content.append(f"> {scraped_content.replace(chr(10), chr(10) + '> ')}")
-            else:
-                content.append("[No content or error reported for this URL]")
 
+            content.append(scraped_content)
             content.append("") # Spacer after each URL's content
 
         content.extend([
-            "---", # Use --- instead of page break for better markdown compatibility
+            "--", 
             ""
         ])
 
     return "\n".join(content)
+
+def custom_scrape_url(
+    url: str,
+    text_model: str = "ollama/llama3.2:3b",
+    vision_model: str = "ollama/llava:7b",
+    download_media: bool = False,
+    media_output_dir: str = "./downloads",
+    use_search_fallback: bool = True
+) -> Optional[Dict[str, Any]]:
+    """
+    Wrapper around URLScraper.scrape_url that skips YouTube processing.
+    This prevents double-processing of YouTube URLs.
+    """
+    # Clean the URL first to handle extra parameters 
+    cleaned_url = URLScraper.clean_url(url)
+    
+    # Skip if it's a YouTube URL (we handle those separately)
+    if URLScraper.is_youtube_url(cleaned_url):
+        return {
+            'url': url,
+            'type': 'youtube',
+            'error': 'YouTube URLs are handled by our enhanced processor',
+            'content': '[Error: YouTube processing attempted through general URL scraper]'
+        }
+    
+    # For non-YouTube URLs, use the original scraper
+    return URLScraper.scrape_url(
+        url,
+        text_model=text_model,
+        vision_model=vision_model,
+        download_media=download_media,
+        media_output_dir=media_output_dir,
+        use_search_fallback=use_search_fallback
+    )
 
 def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
     """
@@ -248,34 +203,76 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
         logger.info(f"  Found URLs: {', '.join(all_urls)}")
         processed_url_results = []
         any_scrape_successful = False
+        
+        # Track already processed YouTube video IDs to avoid duplicates
+        processed_youtube_ids = set()
 
         for url in all_urls:
             logger.debug(f"  Scraping URL: {url}")
-            # Call the updated scraper method, passing relevant args
-            scrape_result = URLScraper.scrape_url(
-                url,
-                text_model=args.text_model,
-                vision_model=args.vision_model, # Still passed, but used less now
-                download_media=args.download_twitter_media, # CRITICAL: Pass the download_media flag
-                media_output_dir=args.twitter_media_output, # CRITICAL: Pass the output directory
-                use_search_fallback=not args.no_search_fallback # Pass fallback flag
-            )
-
-            if scrape_result and scrape_result.get('content') and not scrape_result.get('error'):
-                processed_url_results.append(scrape_result)
-                any_scrape_successful = True
-                # Log downloaded media if any
-                if scrape_result.get('downloaded_media_paths'):
-                    logger.info(f"  ✓ Successfully downloaded {len(scrape_result['downloaded_media_paths'])} media files for: {url}")
+            
+            # Handle YouTube URLs with enhanced processing
+            if URLScraper.is_youtube_url(url):
+                # Check if this video ID has already been processed
+                from yt_extractor import YouTubeDataFetcher
+                video_id = YouTubeDataFetcher.extract_video_id(url)
+                
+                if video_id in processed_youtube_ids:
+                    logger.info(f"  Skipping duplicate YouTube URL: {url} (already processed video ID: {video_id})")
+                    continue
+                
+                logger.info(f"  Processing YouTube URL: {url}")
+                youtube_result = enhance_youtube_processing(
+                    url, 
+                    text_model=args.text_model,
+                    download_youtube_video=args.download_youtube_videos,
+                    youtube_output_dir=args.youtube_output_dir
+                )
+                
+                # Remember this video ID to avoid reprocessing
+                if video_id:
+                    processed_youtube_ids.add(video_id)
+                  
+                processed_url_results.append(youtube_result)
+                if youtube_result and youtube_result.get('content') and not youtube_result.get('error'):
+                    any_scrape_successful = True
+                    if youtube_result.get('downloaded_video_path'):
+                        logger.info(f"  ✓ Successfully processed and downloaded video for: {url}")
+                    else:
+                        logger.info(f"  ✓ Successfully processed YouTube URL: {url}")
                 else:
-                    logger.info(f"  ✓ Successfully scraped: {url}")
-            elif scrape_result: # Scrape attempted, but failed or no content
-                processed_url_results.append(scrape_result) # Keep result to show error in report
-                logger.warning(f"  ⚠ Failed to get valid content for: {url} (Error: {scrape_result.get('error', 'No content')})")
-            else: # Scraper returned None (should be rare)
-                processed_url_results.append({'url': url, 'error': 'Scraper returned None', 'content': '[Error: Scraper failed unexpectedly]'})
-                logger.error(f"  ✕ Scraper returned None for URL: {url}")
+                    logger.warning(f"  ⚠ Failed to process YouTube URL: {url} (Error: {youtube_result.get('error', 'Unknown error')})")
+                
+            # Skip YouTube handling in URL scraper by using a custom processing wrapper
+            else:
+                # For non-YouTube URLs, use the existing scrape_url method
+                try:
+                    # Use custom_scrape_url to handle non-YouTube URLs
+                    scrape_result = custom_scrape_url(
+                        url,
+                        text_model=args.text_model,
+                        vision_model=args.vision_model,
+                        download_media=args.download_twitter_media,
+                        media_output_dir=args.twitter_media_output,
+                        use_search_fallback=not args.no_search_fallback
+                    )
 
+                    if scrape_result and scrape_result.get('content') and not scrape_result.get('error'):
+                        processed_url_results.append(scrape_result)
+                        any_scrape_successful = True
+                        # Log downloaded media if any
+                        if scrape_result.get('downloaded_media_paths'):
+                            logger.info(f"  ✓ Successfully downloaded {len(scrape_result['downloaded_media_paths'])} media files for: {url}")
+                        else:
+                            logger.info(f"  ✓ Successfully scraped: {url}")
+                    elif scrape_result: # Scrape attempted, but failed or no content
+                        processed_url_results.append(scrape_result) # Keep result to show error in report
+                        logger.warning(f"  ⚠ Failed to get valid content for: {url} (Error: {scrape_result.get('error', 'No content')})")
+                    else: # Scraper returned None (should be rare)
+                        processed_url_results.append({'url': url, 'error': 'Scraper returned None', 'content': '[Error: Scraper failed unexpectedly]'})
+                        logger.error(f"  ✕ Scraper returned None for URL: {url}")
+                except Exception as e:
+                    processed_url_results.append({'url': url, 'error': f'Error during scraping: {str(e)}', 'content': f'[Error: {str(e)}]'})
+                    logger.error(f"  ✕ Exception while scraping URL {url}: {e}")
 
         mark_as_failed = not any_scrape_successful
 
@@ -318,14 +315,20 @@ def main():
     parser.add_argument('--text-model', type=str, default='ollama/llama3:8b', help='Text model for summarization (e.g., ollama/llama3:8b, openai/gpt-3.5-turbo)') # Updated default
     parser.add_argument('--vision-model', type=str, default='ollama/llava:13b', help='Vision model (usage reduced, kept for potential future use)') # Updated default
     parser.add_argument('--screen', action='store_true', help='Display markdown output to screen instead of saving to file')
-    # New args for Twitter media
+    
+    # Twitter media download args
     parser.add_argument('--download-twitter-media', action='store_true', help='Download media from successfully processed Twitter/X links')
     parser.add_argument('--twitter-media-output', type=str, default='./downloads', help='Output directory for Twitter/X media downloads')
-    # New arg for search fallback control
+    
+    # Add YouTube video download args (similar to Twitter media)
+    parser.add_argument('--download-youtube-videos', action='store_true', help='Download videos from successfully processed YouTube links')
+    parser.add_argument('--youtube-output-dir', type=str, default='./downloads', help='Output directory for YouTube video downloads')
+    
+    # Search fallback control
     parser.add_argument('--no-search-fallback', action='store_true', help='Disable Google Search fallback for failed extractions')
-     # Add verbosity control
+    
+    # Verbosity control
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose DEBUG logging')
-
 
     args = parser.parse_args()
 
@@ -340,10 +343,14 @@ def main():
     logger.info("Starting Todoist processing...")
     logger.debug(f"Arguments: {args}")
 
-    # --- Ensure Media Directory Exists (for Twitter downloads) ---
+    # --- Ensure Media Directory Exists (for Twitter and YouTube downloads) ---
     if args.download_twitter_media:
-         Path(args.twitter_media_output).mkdir(parents=True, exist_ok=True)
-         logger.info(f"Twitter media download enabled. Output directory: {args.twitter_media_output}")
+        Path(args.twitter_media_output).mkdir(parents=True, exist_ok=True)
+        logger.info(f"Twitter media download enabled. Output directory: {args.twitter_media_output}")
+    
+    if args.download_youtube_videos:
+        Path(args.youtube_output_dir).mkdir(parents=True, exist_ok=True)
+        logger.info(f"YouTube video download enabled. Output directory: {args.youtube_output_dir}")
 
     try:
         api = TodoistAPI(get_api_key())
