@@ -8,3 +8,6 @@ llm_vision.ipynb
 .DS_Store
 package-lock.json
 todoistbot.code-workspace
+yt-proto.ipynb
+LLM_tests.ipynb
+.gitignore
