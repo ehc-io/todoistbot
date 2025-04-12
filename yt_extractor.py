@@ -1063,8 +1063,8 @@ def enhance_youtube_processing(
         downloaded_video_path = None
         s3_url = None
         
+        # Case 1: Download video locally and possibly upload to S3
         if download_youtube_video:
-            # Download video
             try:
                 logger.info(f"Downloading YouTube video: {url}")
                 download_result = fetcher.download_video(url)
@@ -1073,20 +1073,30 @@ def enhance_youtube_processing(
                     result['downloaded_video_path'] = downloaded_video_path
                     logger.info(f"Successfully downloaded video to: {downloaded_video_path}")
                     
-                    # Add S3 URL if available (this happens automatically if S3 is configured)
-                    if download_result.get('s3_url'):
-                        s3_url = download_result.get('s3_url')
-                        result['s3_url'] = s3_url
-                        logger.info(f"Successfully uploaded downloaded video to S3: {s3_url}")
+                    # Upload to S3 if requested and not already uploaded during download
+                    if s3_upload and not download_result.get('s3_url') and downloaded_video_path:
+                        try:
+                            s3_url = fetcher.upload_to_s3(downloaded_video_path)
+                            if s3_url:
+                                result['s3_url'] = s3_url
+                                logger.info(f"Successfully uploaded downloaded video to S3: {s3_url}")
+                            else:
+                                logger.warning("Failed to upload video to S3 after download")
+                        except Exception as s3_e:
+                            logger.error(f"Error uploading downloaded video to S3: {s3_e}")
+                    # If S3 URL was already set during download
+                    elif s3_upload and download_result.get('s3_url'):
+                        result['s3_url'] = download_result.get('s3_url')
                 else:
                     error_msg = download_result.get('error') if download_result else "Unknown download error"
                     logger.warning(f"Failed to download video: {error_msg}")
             except Exception as e:
                 logger.error(f"Error during video download: {e}")
+        
+        # Case 2: S3 upload requested without local download (create reference only)
         elif s3_upload:
-            # Create S3 reference without downloading
             try:
-                logger.info(f"Creating S3 reference for YouTube video without downloading: {url}")
+                logger.info(f"Creating S3 reference for YouTube video without local download: {url}")
                 s3_url = fetcher.direct_upload_to_s3(video_id, video_details.get('title', 'Unknown'))
                 if s3_url:
                     result['s3_url'] = s3_url

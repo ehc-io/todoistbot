@@ -156,7 +156,9 @@ def custom_scrape_url(
     vision_model: str = "ollama/llava:7b",
     download_media: bool = False,
     media_output_dir: str = "downloads",
-    use_search_fallback: bool = True
+    use_search_fallback: bool = True,
+    s3_upload: bool = False,
+    s3_bucket: str = None
 ) -> Optional[Dict[str, Any]]:
     """
     Wrapper around URLScraper.scrape_url that skips YouTube processing.
@@ -181,7 +183,9 @@ def custom_scrape_url(
         vision_model=vision_model,
         download_media=download_media,
         media_output_dir=media_output_dir,
-        use_search_fallback=use_search_fallback
+        use_search_fallback=use_search_fallback,
+        s3_upload=s3_upload,
+        s3_bucket=s3_bucket
     )
 
 def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
@@ -238,9 +242,9 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                 youtube_result = enhance_youtube_processing(
                     url, 
                     text_model=args.text_model,
-                    download_youtube_video=args.download_youtube_videos,
-                    youtube_output_dir=args.youtube_output_dir,
-                    s3_upload=args.upload_to_s3,
+                    download_youtube_video=args.download_media,
+                    youtube_output_dir=args.output_dir,
+                    s3_upload=args.s3_upload,
                     s3_bucket=args.s3_bucket
                 )
                 
@@ -270,9 +274,11 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                         url,
                         text_model=args.text_model,
                         vision_model=args.vision_model,
-                        download_media=args.download_twitter_media,
-                        media_output_dir=args.twitter_media_output,
-                        use_search_fallback=not args.no_search_fallback
+                        download_media=args.download_media,
+                        media_output_dir=args.output_dir,
+                        use_search_fallback=not args.no_search_fallback,
+                        s3_upload=args.s3_upload,
+                        s3_bucket=args.s3_bucket
                     )
 
                     if scrape_result and scrape_result.get('content') and not scrape_result.get('error'):
@@ -331,25 +337,19 @@ def main():
     # Existing args
     parser.add_argument('--no-close', action='store_true', help='Do not mark tasks as closed after processing')
     parser.add_argument('--max-tasks', type=int, default=None, help='Maximum number of tasks to process (default: all)')
-    parser.add_argument('--text-model', type=str, default='ollama/llama3:8b', help='Text model for summarization (e.g., ollama/llama3:8b, openai/gpt-3.5-turbo)') # Updated default
+    parser.add_argument('--text-model', type=str, default='ollama/llama3.2:3b', help='Text model for summarization (e.g., ollama/llama3.2:3b, openai/gpt-3.5-turbo)') # Updated default
     parser.add_argument('--vision-model', type=str, default='ollama/llava:13b', help='Vision model (usage reduced, kept for potential future use)') # Updated default
     parser.add_argument('--screen', action='store_true', help='Display markdown output to screen instead of saving to file')
-    
-    # Twitter media download args
-    parser.add_argument('--download-twitter-media', action='store_true', help='Download media from successfully processed Twitter/X links')
-    parser.add_argument('--twitter-media-output', type=str, default='downloads', help='Output directory for Twitter/X media downloads')
-    
-    # Add YouTube video download args (similar to Twitter media)
-    parser.add_argument('--download-youtube-videos', action='store_true', help='Download videos from successfully processed YouTube links to local storage')
-    parser.add_argument('--youtube-output-dir', type=str, default='downloads', help='Output directory for YouTube video downloads')
-    
-    # Add S3 upload options
-    parser.add_argument('--upload-to-s3', action='store_true', help='Create S3 references for YouTube videos (works with or without local download)')
-    parser.add_argument('--s3-bucket', type=str, default='2025-captured-notes', help='S3 bucket name for YouTube reference uploads')
-    
+
+    # Unified media handling options
+    parser.add_argument('--download-media', action='store_true', help='Download media (videos/images) from successfully processed Twitter/X and YouTube links')
+    parser.add_argument('--output-dir', type=str, default='downloads', help='Output directory for all media downloads')
+    parser.add_argument('--s3-upload', action='store_true', help='Upload media to S3 (works with or without local download)')
+    parser.add_argument('--s3-bucket', type=str, default='2025-captured-notes', help='S3 bucket name for media uploads')
+
     # Search fallback control
     parser.add_argument('--no-search-fallback', action='store_true', help='Disable Google Search fallback for failed extractions')
-    
+
     # Verbosity control
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose DEBUG logging')
 
@@ -367,22 +367,15 @@ def main():
     logger.debug(f"Arguments: {args}")
 
     # --- Ensure Media Directory Exists (for Twitter and YouTube downloads) ---
-    if args.download_twitter_media:
-        Path(args.twitter_media_output).mkdir(parents=True, exist_ok=True)
-        logger.info(f"Twitter media download enabled. Output directory: {args.twitter_media_output}")
-    
-    if args.download_youtube_videos:
-        Path(args.youtube_output_dir).mkdir(parents=True, exist_ok=True)
-        logger.info(f"YouTube video download enabled. Output directory: {args.youtube_output_dir}")
+    if args.download_media:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        logger.info(f"Media download enabled. Output directory: {args.output_dir}")
         
     # --- Check S3 settings ---
-    if args.upload_to_s3:
+    if args.s3_upload:
         try:
             import boto3
-            if args.download_youtube_videos:
-                logger.info(f"S3 upload enabled for downloaded videos. Bucket: {args.s3_bucket}")
-            else:
-                logger.info(f"S3 reference creation enabled (without local download). Bucket: {args.s3_bucket}")
+            logger.info(f"S3 upload enabled. Bucket: {args.s3_bucket}")
         except ImportError:
             logger.error("Error: boto3 not installed. Install with: pip install boto3")
             return 1

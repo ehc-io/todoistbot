@@ -737,11 +737,21 @@ Commit Activity: {commit_activity}
         url: str,
         session_manager: TwitterSessionManager,
         download_media: bool = False,
-        media_output_dir: str = "./downloads"
+        media_output_dir: str = "./downloads",
+        s3_upload: bool = False,
+        s3_bucket: str = None
         ) -> Optional[Dict[str, Any]]:
         """
         Processes Twitter/X content using the modular structure.
         Ensures valid session, extracts page content, fetches API data and downloads media if requested.
+        
+        Args:
+            url: The Twitter/X URL to process
+            session_manager: TwitterSessionManager instance for authentication
+            download_media: Whether to download and save media files locally
+            media_output_dir: Directory for downloaded media
+            s3_upload: Whether to upload media to S3
+            s3_bucket: S3 bucket name for uploads
         """
         logger.info(f"Processing Twitter/X URL: {url}")
 
@@ -787,6 +797,7 @@ Commit Activity: {commit_activity}
             'details': page_details, # Contains text, user, time, urls etc.
             'media_urls': [],
             'downloaded_media_paths': [],
+            's3_urls': [],  # To store S3 URLs of uploaded files
             'extraction_method': 'playwright_bs4',
         }
         
@@ -872,45 +883,132 @@ Commit Activity: {commit_activity}
 
         # 5. Download Media if Requested and Available
         # CRITICAL: Debug log to check media_items content
-        logger.info(f"Media items to download: {len(media_items)} (Download requested: {download_media})")
+        logger.info(f"Media items to download: {len(media_items)} (Download requested: {download_media}, S3 upload: {s3_upload})")
         if media_items:
             logger.debug(f"First media item: {media_items[0] if media_items else 'None'}")
 
-        if download_media and media_items:
-            logger.info(f"Media download requested for {len(media_items)} items, proceeding with download...")
+        # Setup S3 client if needed
+        s3_client = None
+        if s3_upload and media_items:
             try:
-                # Create output directory if it doesn't exist
-                os.makedirs(media_output_dir, exist_ok=True)
+                import boto3
+                from botocore.exceptions import NoCredentialsError, ClientError
                 
+                s3_client = boto3.client('s3')
+                
+                # Test bucket access
+                try:
+                    s3_client.head_bucket(Bucket=s3_bucket)
+                    logger.info(f"Successfully connected to S3 bucket: {s3_bucket}")
+                except Exception as e:
+                    logger.error(f"Error connecting to S3 bucket {s3_bucket}: {e}")
+                    s3_client = None
+                    s3_upload = False  # Disable S3 upload
+            except ImportError:
+                logger.error("boto3 not installed. Cannot upload to S3. Install with: pip install boto3")
+                s3_client = None
+                s3_upload = False  # Disable S3 upload
+
+        # Handle download and/or S3 upload of media
+        if (download_media or s3_upload) and media_items:
+            try:
+                # Create output directory if downloading locally
+                if download_media:
+                    os.makedirs(media_output_dir, exist_ok=True)
+                
+                # Set up downloader (needed whether we store locally or not)
                 downloader = TwitterMediaDownloader(output_dir=media_output_dir)
+                
+                # Download media items
                 downloaded_files_info = downloader.download_media_items(media_items, page_details, tweet_id)
                 
                 if downloaded_files_info:
-                    result['downloaded_media_paths'] = [f['path'] for f in downloaded_files_info]
+                    # Track download information
+                    if download_media:
+                        result['downloaded_media_paths'] = [f['path'] for f in downloaded_files_info]
                     
-                    # Update content with download information
+                    # Upload to S3 if requested
+                    if s3_upload and s3_client:
+                        s3_upload_results = []
+                        
+                        # For each downloaded file, upload to S3
+                        for file_info in downloaded_files_info:
+                            file_path = file_info.get('path')
+                            if file_path:
+                                try:
+                                    # Use week number of the year (ISO week date format)
+                                    from datetime import datetime
+                                    current_date = datetime.now()
+                                    week_of_year = current_date.isocalendar()[1]
+                                    folder_name = f"week_{week_of_year:02d}"
+                                    
+                                    # Get just the filename
+                                    filename = os.path.basename(file_path)
+                                    
+                                    # Final object path: week_XX/filename
+                                    object_name = f"{folder_name}/{filename}"
+                                    
+                                    # Upload to S3
+                                    logger.info(f"Uploading {file_path} to S3 bucket {s3_bucket}, folder: {folder_name}")
+                                    s3_client.upload_file(file_path, s3_bucket, object_name)
+                                    s3_url = f"https://{s3_bucket}.s3.amazonaws.com/{object_name}"
+                                    s3_upload_results.append({
+                                        'file_path': file_path,
+                                        's3_url': s3_url,
+                                        'media_type': file_info.get('type', 'unknown')
+                                    })
+                                    logger.info(f"Successfully uploaded to S3: {s3_url}")
+                                    
+                                    # If we don't want to keep files locally, delete after S3 upload
+                                    if not download_media and os.path.exists(file_path):
+                                        os.unlink(file_path)
+                                        logger.info(f"Removed temporary file after S3 upload: {file_path}")
+                                    
+                                except Exception as s3_e:
+                                    logger.error(f"Failed to upload {file_path} to S3: {s3_e}")
+                        
+                        # Add S3 URLs to result
+                        if s3_upload_results:
+                            result['s3_urls'] = [item['s3_url'] for item in s3_upload_results]
+                    
+                    # Update content with download/upload information
                     media_types = {}
                     for file_info in downloaded_files_info:
                         media_type = file_info.get('type', 'unknown')
                         media_types[media_type] = media_types.get(media_type, 0) + 1
                     
-                    download_info = [f"Downloaded {len(downloaded_files_info)} media files:"]
+                    # Create download/upload information
+                    if download_media and s3_upload:
+                        download_info = [f"Downloaded and uploaded to S3 {len(downloaded_files_info)} media files:"]
+                    elif download_media:
+                        download_info = [f"Downloaded {len(downloaded_files_info)} media files:"]
+                    else:  # S3 upload only
+                        download_info = [f"Uploaded to S3 {len(downloaded_files_info)} media files:"]
+                    
                     for media_type, count in media_types.items():
                         download_info.append(f"- {media_type.capitalize()}: {count}")
                     
+                    # Add S3 URLs to content if uploaded
+                    if s3_upload and result.get('s3_urls'):
+                        download_info.append("\nS3 Locations:")
+                        for s3_url in result.get('s3_urls')[:3]:  # Only show first 3 to avoid clutter
+                            download_info.append(f"- {s3_url}")
+                        if len(result.get('s3_urls')) > 3:
+                            download_info.append(f"- ... and {len(result.get('s3_urls')) - 3} more")
+                    
                     result['content'] += "\n\n" + "\n".join(download_info)
-                    logger.info(f"Successfully downloaded {len(downloaded_files_info)} media files")
+                    logger.info(f"Successfully processed {len(downloaded_files_info)} media files")
                 else:
-                    logger.warning("No media files were successfully downloaded")
-                    result['content'] += "\n\n[Note: Media download was attempted but no files were successfully downloaded]"
+                    logger.warning("No media files were successfully downloaded/uploaded")
+                    result['content'] += "\n\n[Note: Media download/upload was attempted but no files were successfully processed]"
                     
             except Exception as dl_e:
-                logger.error(f"Error during media download process: {dl_e}", exc_info=True)
-                result['error'] = result.get('error', '') + f'; Media download error: {dl_e}'
-                result['content'] += "\n\n[Error during media download: Check logs for details]"
-        elif download_media and not media_items:
-            logger.info("Media download requested, but no media items were found via API.")
-            result['content'] += "\n\n[Note: No media files found to download]"
+                logger.error(f"Error during media processing: {dl_e}", exc_info=True)
+                result['error'] = result.get('error', '') + f'; Media processing error: {dl_e}'
+                result['content'] += "\n\n[Error during media processing: Check logs for details]"
+        elif (download_media or s3_upload) and not media_items:
+            logger.info("Media processing requested, but no media items were found via API.")
+            result['content'] += "\n\n[Note: No media files found to process]"
 
         logger.info(f"✓ Successfully processed Twitter URL: {url}")
         return result
@@ -961,7 +1059,9 @@ Commit Activity: {commit_activity}
         vision_model: str = "ollama/llava:7b", # Keep vision model for non-specialized cases
         download_media: bool = False, # Flag for media download (esp. Twitter)
         media_output_dir: str = "./downloads",
-        use_search_fallback: bool = True # Control search fallback
+        use_search_fallback: bool = True, # Control search fallback
+        s3_upload: bool = False, # Flag for S3 upload
+        s3_bucket: str = None # S3 bucket name
         ) -> Optional[Dict[str, Any]]:
         """
         Scrapes a given URL, handling different content types and using LLMs for summarization.
@@ -978,12 +1078,14 @@ Commit Activity: {commit_activity}
         # --- Handle Special URL Types First ---
         if URLScraper.is_twitter_url(cleaned_url):
             session_manager = TwitterSessionManager() # Initialize session manager
-            # Pass download flag and output dir
+            # Pass download flag, output dir, and S3 options
             twitter_result = URLScraper.process_twitter_content(
                 cleaned_url,
                 session_manager,
                 download_media=download_media,
-                media_output_dir=media_output_dir
+                media_output_dir=media_output_dir,
+                s3_upload=s3_upload,
+                s3_bucket=s3_bucket
                 )
             return twitter_result # Return directly, process_twitter_content handles format
 
