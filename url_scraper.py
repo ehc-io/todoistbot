@@ -7,6 +7,7 @@ import sys
 import tempfile
 import requests
 import pypandoc
+import html2text
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout, Error as PlaywrightError
@@ -373,8 +374,10 @@ class URLScraper:
             url: str, 
             browser, 
             text_model: str,
-            save_screenshot: bool = False,  # Parameter to control screenshot saving
-            screenshot_dir: str = "screenshots"  # Default directory for saved screenshots
+            save_media_locally: bool = False,
+            media_output_dir: str = "downloads",
+            s3_upload: bool = False,
+            s3_bucket: str = None
         ) -> Dict[str, Any]:
             """
             Scrapes a GitHub repository using a mix of web scraping and LLM inference
@@ -382,8 +385,10 @@ class URLScraper:
                 url: The GitHub repository URL
                 browser: Playwright browser instance
                 text_model: The text LLM model to use
-                save_screenshot: Whether to save a permanent copy of the screenshot for debugging
-                screenshot_dir: Directory where screenshots should be saved
+                save_media_locally: Whether to save repository content as markdown locally
+                media_output_dir: Directory where markdown files should be saved
+                s3_upload: Whether to upload markdown to S3
+                s3_bucket: S3 bucket name for uploads
                 
             Returns:
                 Dictionary with scraped information
@@ -410,17 +415,11 @@ class URLScraper:
                 # Wait for content to be visible
                 page.wait_for_timeout(3000)  # Additional time for dynamic content
                 
-                # Create a unique filename for the screenshot
+                # Create a unique filename for potential markdown
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 repo_parts = url.rstrip('/').split('/')
                 repo_identifier = f"{repo_parts[-2]}_{repo_parts[-1]}" if len(repo_parts) >= 2 else "unknown_repo"
-                screenshot_filename = f"github_{repo_identifier}_{timestamp}.png"
-                
-                # Prepare screenshot directory if saving is enabled
-                if save_screenshot:
-                    os.makedirs(screenshot_dir, exist_ok=True)
-                    screenshot_path = os.path.join(screenshot_dir, screenshot_filename)
-                    logger.info(f"Will save debug screenshot to: {screenshot_path}")
+                markdown_filename = f"github_{repo_identifier}_{timestamp}.md"
 
                 # Extract information through web scraping
                 logger.debug(f"Extracting GitHub repo content using CSS selectors")
@@ -549,10 +548,108 @@ Commit Activity: {commit_activity}
                 result['extraction_method'] = 'github_web_scraping_with_llm'
                 logger.info(f"Successfully analyzed GitHub repo")
                 
-                # Save screenshot if enabled
-                if save_screenshot and screenshot_path:
-                    page.screenshot(path=screenshot_path)
-                    logger.debug(f"Saved screenshot to {screenshot_path}")
+                # Create and save markdown version of the repo if requested
+                if save_media_locally or s3_upload:
+                    try:
+                        # Get the HTML of the README as markdown content
+                        try:
+                            readme_html = ""
+                            if readme_elem:
+                                readme_html = readme_elem.inner_html()
+                            repo_markdown = URLScraper.convert_html_to_markdown(readme_html)
+                        except Exception as md_e:
+                            logger.warning(f"Error converting README HTML to markdown: {md_e}")
+                            # Fallback to text content if HTML to markdown conversion fails
+                            repo_markdown = readme_content
+
+                        # Create a comprehensive markdown file
+                        markdown_content = f"# GitHub Repository: {repo_title}\n\n"
+                        markdown_content += f"URL: [{url}]({url})\n\n"
+                        markdown_content += f"Captured on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                        markdown_content += f"## Description\n\n{repo_description}\n\n"
+                        markdown_content += f"## Statistics\n\n"
+                        markdown_content += f"- Stars: {stats.get('stars', '0')}\n"
+                        markdown_content += f"- Forks: {stats.get('forks', '0')}\n"
+                        markdown_content += f"- Watchers: {stats.get('watching', '0')}\n"
+                        markdown_content += f"- Commit Activity: {commit_activity}\n\n"
+                        
+                        if languages:
+                            markdown_content += f"## Technologies\n\n{technologies}\n\n"
+                        
+                        markdown_content += f"## Summary\n\n{summary}\n\n"
+                        
+                        if repo_markdown:
+                            markdown_content += f"## README Content\n\n{repo_markdown}\n\n"
+                            
+                        # Save locally if requested
+                        local_path = None
+                        if save_media_locally:
+                            # Ensure directory exists
+                            os.makedirs(media_output_dir, exist_ok=True)
+                            local_path = os.path.join(media_output_dir, markdown_filename)
+                            
+                            with open(local_path, 'w', encoding='utf-8') as f:
+                                f.write(markdown_content)
+                            
+                            logger.info(f"Saved GitHub repo markdown to {local_path}")
+                            result['downloaded_markdown_path'] = local_path
+                        
+                        # Upload to S3 if requested
+                        if s3_upload:
+                            try:
+                                import boto3
+                                
+                                # Set up S3 client
+                                s3_client = boto3.client('s3')
+                                
+                                # Use week-based folder structure
+                                week_of_year = datetime.now().isocalendar()[1]
+                                folder_name = f"week_{week_of_year:02d}"
+                                
+                                # Upload path: week_XX/filename
+                                object_name = f"{folder_name}/{markdown_filename}"
+                                
+                                # If we have a local file, upload it
+                                if local_path and os.path.exists(local_path):
+                                    logger.info(f"Uploading GitHub markdown file to S3 bucket {s3_bucket}, folder: {folder_name}")
+                                    s3_client.upload_file(local_path, s3_bucket, object_name)
+                                # Otherwise, upload the content directly
+                                else:
+                                    logger.info(f"Uploading GitHub markdown content directly to S3 bucket {s3_bucket}, folder: {folder_name}")
+                                    s3_client.put_object(
+                                        Bucket=s3_bucket,
+                                        Key=object_name,
+                                        Body=markdown_content.encode('utf-8'),
+                                        ContentType='text/markdown'
+                                    )
+                                
+                                # Generate S3 URL
+                                s3_url = f"https://{s3_bucket}.s3.amazonaws.com/{object_name}"
+                                logger.info(f"Successfully uploaded GitHub repo markdown to S3: {s3_url}")
+                                result['s3_url'] = s3_url
+                                
+                                # If we only wanted to upload to S3 and not keep locally
+                                if s3_upload and not save_media_locally and local_path and os.path.exists(local_path):
+                                    os.unlink(local_path)
+                                    logger.info(f"Removed temporary file after S3 upload: {local_path}")
+                                
+                            except ImportError:
+                                logger.error("boto3 not installed. Cannot upload to S3. Install with: pip install boto3")
+                                result['error'] = 'S3 upload failed: boto3 not installed'
+                            except Exception as s3_e:
+                                logger.error(f"Error uploading GitHub markdown to S3: {s3_e}")
+                                result['error'] = f'S3 upload failed: {str(s3_e)}'
+                        
+                        # Add information about markdown file to the content response
+                        if save_media_locally and 'downloaded_markdown_path' in result:
+                            result['content'] += f"\n\n[GitHub repo markdown saved to: {result['downloaded_markdown_path']}]"
+                        
+                        if s3_upload and 's3_url' in result:
+                            result['content'] += f"\n\n[GitHub repo markdown uploaded to S3: {result['s3_url']}]"
+                            
+                    except Exception as e:
+                        logger.error(f"Error saving/uploading GitHub repo markdown: {e}")
+                        result['error'] = f'File handling error: {str(e)}'
                     
             except PlaywrightTimeout as e:
                 logger.error(f"Timeout accessing GitHub repo {url}: {e}")
@@ -736,7 +833,7 @@ Commit Activity: {commit_activity}
     def process_twitter_content(
         url: str,
         session_manager: TwitterSessionManager,
-        download_media: bool = False,
+        save_media_locally: bool = False,
         media_output_dir: str = "./downloads",
         s3_upload: bool = False,
         s3_bucket: str = None
@@ -748,7 +845,7 @@ Commit Activity: {commit_activity}
         Args:
             url: The Twitter/X URL to process
             session_manager: TwitterSessionManager instance for authentication
-            download_media: Whether to download and save media files locally
+            save_media_locally: Whether to download and save media files locally
             media_output_dir: Directory for downloaded media
             s3_upload: Whether to upload media to S3
             s3_bucket: S3 bucket name for uploads
@@ -883,7 +980,7 @@ Commit Activity: {commit_activity}
 
         # 5. Download Media if Requested and Available
         # CRITICAL: Debug log to check media_items content
-        logger.info(f"Media items to download: {len(media_items)} (Download requested: {download_media}, S3 upload: {s3_upload})")
+        logger.info(f"Media items to download: {len(media_items)} (Download requested: {save_media_locally}, S3 upload: {s3_upload})")
         if media_items:
             logger.debug(f"First media item: {media_items[0] if media_items else 'None'}")
 
@@ -910,10 +1007,10 @@ Commit Activity: {commit_activity}
                 s3_upload = False  # Disable S3 upload
 
         # Handle download and/or S3 upload of media
-        if (download_media or s3_upload) and media_items:
+        if (save_media_locally or s3_upload) and media_items:
             try:
                 # Create output directory if downloading locally
-                if download_media:
+                if save_media_locally:
                     os.makedirs(media_output_dir, exist_ok=True)
                 
                 # Set up downloader (needed whether we store locally or not)
@@ -924,7 +1021,7 @@ Commit Activity: {commit_activity}
                 
                 if downloaded_files_info:
                     # Track download information
-                    if download_media:
+                    if save_media_locally:
                         result['downloaded_media_paths'] = [f['path'] for f in downloaded_files_info]
                     
                     # Upload to S3 if requested
@@ -960,7 +1057,7 @@ Commit Activity: {commit_activity}
                                     logger.info(f"Successfully uploaded to S3: {s3_url}")
                                     
                                     # If we don't want to keep files locally, delete after S3 upload
-                                    if not download_media and os.path.exists(file_path):
+                                    if not save_media_locally and os.path.exists(file_path):
                                         os.unlink(file_path)
                                         logger.info(f"Removed temporary file after S3 upload: {file_path}")
                                     
@@ -978,9 +1075,9 @@ Commit Activity: {commit_activity}
                         media_types[media_type] = media_types.get(media_type, 0) + 1
                     
                     # Create download/upload information
-                    if download_media and s3_upload:
+                    if save_media_locally and s3_upload:
                         download_info = [f"Downloaded and uploaded to S3 {len(downloaded_files_info)} media files:"]
-                    elif download_media:
+                    elif save_media_locally:
                         download_info = [f"Downloaded {len(downloaded_files_info)} media files:"]
                     else:  # S3 upload only
                         download_info = [f"Uploaded to S3 {len(downloaded_files_info)} media files:"]
@@ -1006,7 +1103,7 @@ Commit Activity: {commit_activity}
                 logger.error(f"Error during media processing: {dl_e}", exc_info=True)
                 result['error'] = result.get('error', '') + f'; Media processing error: {dl_e}'
                 result['content'] += "\n\n[Error during media processing: Check logs for details]"
-        elif (download_media or s3_upload) and not media_items:
+        elif (save_media_locally or s3_upload) and not media_items:
             logger.info("Media processing requested, but no media items were found via API.")
             result['content'] += "\n\n[Note: No media files found to process]"
 
@@ -1051,13 +1148,38 @@ Commit Activity: {commit_activity}
         
         return "\n".join(content_parts)
     
-    # --- Updated scrape_url Method ---
+    @staticmethod
+    def convert_html_to_markdown(html_content: str) -> str:
+        """Convert HTML content to markdown using html2text."""
+        if not html_content:
+            return ""
+        
+        try:
+            # Configure html2text
+            h = html2text.HTML2Text()
+            h.unicode_snob = True
+            h.ignore_links = False
+            h.ignore_images = False
+            h.escape_snob = False
+            h.body_width = 0  # No wrapping
+            
+            # Convert HTML to markdown
+            markdown_content = h.handle(html_content)
+            
+            # Basic cleanup
+            markdown_content = re.sub(r'\n{3,}', '\n\n', markdown_content)  # Remove excessive newlines
+            return markdown_content
+            
+        except Exception as e:
+            logger.error(f"Error converting HTML to markdown: {str(e)}")
+            return f"[Error: HTML to markdown conversion failed ({e})]"
+    
     @staticmethod
     def scrape_url(
         url: str,
         text_model: str = "ollama/llama3.2:3b",
         vision_model: str = "ollama/llava:7b", # Keep vision model for non-specialized cases
-        download_media: bool = False, # Flag for media download (esp. Twitter)
+        save_media_locally: bool = False, # Flag for media download (esp. Twitter)
         media_output_dir: str = "./downloads",
         use_search_fallback: bool = True, # Control search fallback
         s3_upload: bool = False, # Flag for S3 upload
@@ -1082,7 +1204,7 @@ Commit Activity: {commit_activity}
             twitter_result = URLScraper.process_twitter_content(
                 cleaned_url,
                 session_manager,
-                download_media=download_media,
+                save_media_locally=save_media_locally,
                 media_output_dir=media_output_dir,
                 s3_upload=s3_upload,
                 s3_bucket=s3_bucket
@@ -1137,11 +1259,94 @@ Commit Activity: {commit_activity}
             result['type'] = 'pdf'
             pdf_content = URLScraper.download_pdf(cleaned_url)
             if pdf_content:
-                 pdf_text = URLScraper.extract_pdf_text(pdf_content)
-                 result['content'] = URLScraper.get_pdf_summary(pdf_text, text_model=text_model)
+                # Extract the text for summary
+                pdf_text = URLScraper.extract_pdf_text(pdf_content)
+                result['content'] = URLScraper.get_pdf_summary(pdf_text, text_model=text_model)
+                
+                # Handle saving PDF locally and/or to S3 as per instructions.md
+                if save_media_locally or s3_upload:
+                    try:
+                        # Generate a filename based on the URL
+                        parsed_url = urlparse(cleaned_url)
+                        domain = parsed_url.netloc.replace("www.", "")
+                        path_slug = os.path.basename(parsed_url.path)
+                        if not path_slug or not path_slug.endswith('.pdf'):
+                            path_slug = "document.pdf"
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"{domain}_{timestamp}_{path_slug}"
+                        
+                        # Save locally if requested
+                        local_path = None
+                        if save_media_locally:
+                            # Ensure directory exists
+                            os.makedirs(media_output_dir, exist_ok=True)
+                            local_path = os.path.join(media_output_dir, filename)
+                            
+                            with open(local_path, 'wb') as f:
+                                f.write(pdf_content)
+                            
+                            logger.info(f"Saved PDF file to {local_path}")
+                            result['downloaded_pdf_path'] = local_path
+                        
+                        # Upload to S3 if requested
+                        if s3_upload:
+                            try:
+                                import boto3
+                                
+                                # Set up S3 client
+                                s3_client = boto3.client('s3')
+                                
+                                # Use week-based folder structure
+                                week_of_year = datetime.now().isocalendar()[1]
+                                folder_name = f"week_{week_of_year:02d}"
+                                
+                                # Upload path: week_XX/filename
+                                object_name = f"{folder_name}/{filename}"
+                                
+                                # If we have a local file, upload it
+                                if local_path and os.path.exists(local_path):
+                                    logger.info(f"Uploading PDF file to S3 bucket {s3_bucket}, folder: {folder_name}")
+                                    s3_client.upload_file(local_path, s3_bucket, object_name)
+                                # Otherwise, upload the content directly
+                                else:
+                                    logger.info(f"Uploading PDF content directly to S3 bucket {s3_bucket}, folder: {folder_name}")
+                                    s3_client.put_object(
+                                        Bucket=s3_bucket,
+                                        Key=object_name,
+                                        Body=pdf_content,
+                                        ContentType='application/pdf'
+                                    )
+                                
+                                # Generate S3 URL
+                                s3_url = f"https://{s3_bucket}.s3.amazonaws.com/{object_name}"
+                                logger.info(f"Successfully uploaded PDF to S3: {s3_url}")
+                                result['s3_url'] = s3_url
+                                
+                                # If we only wanted to upload to S3 and not keep locally
+                                if s3_upload and not save_media_locally and local_path and os.path.exists(local_path):
+                                    os.unlink(local_path)
+                                    logger.info(f"Removed temporary file after S3 upload: {local_path}")
+                                
+                            except ImportError:
+                                logger.error("boto3 not installed. Cannot upload to S3. Install with: pip install boto3")
+                                result['error'] = 'S3 upload failed: boto3 not installed'
+                            except Exception as s3_e:
+                                logger.error(f"Error uploading PDF to S3: {s3_e}")
+                                result['error'] = f'S3 upload failed: {str(s3_e)}'
+                        
+                        # Add information about the PDF file to the content
+                        if save_media_locally and 'downloaded_pdf_path' in result:
+                            result['content'] += f"\n\n[PDF file saved to: {result['downloaded_pdf_path']}]"
+                        
+                        if s3_upload and 's3_url' in result:
+                            result['content'] += f"\n\n[PDF file uploaded to S3: {result['s3_url']}]"
+                            
+                    except Exception as e:
+                        logger.error(f"Error saving/uploading PDF file: {e}")
+                        result['error'] = f'File handling error: {str(e)}'
             else:
-                 result['error'] = 'Failed to download or process PDF'
-                 result['content'] = "[Error: Failed to download or extract PDF content]"
+                result['error'] = 'Failed to download or process PDF'
+                result['content'] = "[Error: Failed to download or extract PDF content]"
             return result
 
         # --- Generic Webpage Processing (including GitHub) ---
@@ -1211,11 +1416,19 @@ Commit Activity: {commit_activity}
                         # Simplified GitHub Extraction: Get Readme/About, Generate Summary
                         try:
                         # Extract "About"
-                            github_result = URLScraper.scrape_github_repo(final_url, browser, text_model)
+                            github_result = URLScraper.scrape_github_repo(
+                                final_url, 
+                                browser, 
+                                text_model,
+                                save_media_locally=save_media_locally,
+                                media_output_dir=media_output_dir,
+                                s3_upload=s3_upload,
+                                s3_bucket=s3_bucket
+                            )
                             result.update(github_result)
-                        except:
-                            logger.error("Error during LLM github summarization")
-                            result['error'] = "Error during LLM github summarization"
+                        except Exception as e:
+                            logger.error(f"Error during GitHub repo processing: {e}")
+                            result['error'] = f"Error during GitHub repo processing: {str(e)}"
                             result['content'] = "[Error: Could not extract GitHub content]"
                     else:
                          # Generic Webpage: Try Pandoc -> LLM
@@ -1223,10 +1436,107 @@ Commit Activity: {commit_activity}
                          logger.info("Processing as generic webpage...")
                          html_content = page.content()
                          text_content = URLScraper.extract_content_with_pandoc(html_content)
-
+                         
+                         # Create markdown version of the webpage if requested
+                         if save_media_locally or s3_upload:
+                             try:
+                                 # Convert HTML to markdown
+                                 markdown_content = URLScraper.convert_html_to_markdown(html_content)
+                                 
+                                 # Generate a filename based on the URL
+                                 parsed_url = urlparse(cleaned_url)
+                                 domain = parsed_url.netloc.replace("www.", "")
+                                 path_slug = re.sub(r'[^\w]', '_', parsed_url.path).strip('_')
+                                 if not path_slug:
+                                     path_slug = "index"
+                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                 filename = f"{domain}_{path_slug}_{timestamp}.md"
+                                 
+                                 # Save locally if save_media_locally is true
+                                 local_path = None
+                                 if save_media_locally:
+                                     # Ensure directory exists
+                                     os.makedirs(media_output_dir, exist_ok=True)
+                                     local_path = os.path.join(media_output_dir, filename)
+                                     
+                                     with open(local_path, 'w', encoding='utf-8') as f:
+                                         # Add title and original URL at the top
+                                         title = page.title() or "Untitled Webpage"
+                                         f.write(f"# {title}\n\n")
+                                         f.write(f"Source: [{cleaned_url}]({cleaned_url})\n\n")
+                                         f.write(f"Captured on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                                         f.write("---\n\n")
+                                         f.write(markdown_content)
+                                     
+                                     logger.info(f"Saved markdown version of webpage to {local_path}")
+                                     result['downloaded_markdown_path'] = local_path
+                                 
+                                 # Upload to S3 if s3_upload is true
+                                 if s3_upload:
+                                     try:
+                                         import boto3
+                                         
+                                         # Set up S3 client
+                                         s3_client = boto3.client('s3')
+                                         
+                                         # Use week-based folder structure like Twitter media
+                                         week_of_year = datetime.now().isocalendar()[1]
+                                         folder_name = f"week_{week_of_year:02d}"
+                                         
+                                         # Upload path: week_XX/filename
+                                         object_name = f"{folder_name}/{filename}"
+                                         
+                                         # If we have a local file, upload it
+                                         if local_path and os.path.exists(local_path):
+                                             logger.info(f"Uploading markdown file to S3 bucket {s3_bucket}, folder: {folder_name}")
+                                             s3_client.upload_file(local_path, s3_bucket, object_name)
+                                         # Otherwise, upload the content directly
+                                         else:
+                                             # Create the full markdown content
+                                             title = page.title() or "Untitled Webpage"
+                                             full_markdown = f"# {title}\n\n"
+                                             full_markdown += f"Source: [{cleaned_url}]({cleaned_url})\n\n"
+                                             full_markdown += f"Captured on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                                             full_markdown += "---\n\n"
+                                             full_markdown += markdown_content
+                                             
+                                             # Upload the content directly to S3
+                                             s3_client.put_object(
+                                                 Bucket=s3_bucket,
+                                                 Key=object_name,
+                                                 Body=full_markdown.encode('utf-8'),
+                                                 ContentType='text/markdown'
+                                             )
+                                             
+                                         # Generate S3 URL
+                                         s3_url = f"https://{s3_bucket}.s3.amazonaws.com/{object_name}"
+                                         logger.info(f"Uploaded markdown to S3: {s3_url}")
+                                         result['s3_url'] = s3_url
+                                         
+                                         # If we only wanted to upload to S3 and not keep locally
+                                         if s3_upload and not save_media_locally and local_path and os.path.exists(local_path):
+                                             os.unlink(local_path)
+                                             logger.info(f"Removed temporary file after S3 upload: {local_path}")
+                                         
+                                     except ImportError:
+                                         logger.error("boto3 not installed. Cannot upload to S3. Install with: pip install boto3")
+                                     except Exception as s3_e:
+                                         logger.error(f"Error uploading markdown to S3: {s3_e}")
+                             
+                             except Exception as md_e:
+                                 logger.error(f"Error processing markdown version of webpage: {md_e}")
+                         
                          if text_content and not text_content.startswith("[Error:") and len(text_content) > 50: # Basic check for valid content
                               extraction_method = 'pandoc_llm'
                               result['content'] = URLScraper.get_webpage_summary(text_content, text_model)
+                              
+                              # Add information about markdown file to the content if available
+                              if save_media_locally and 'downloaded_markdown_path' in result:
+                                  result['content'] += f"\n\n[Markdown version saved to: {result['downloaded_markdown_path']}]"
+                              
+                              if s3_upload and 's3_url' in result:
+                                  result['content'] += f"\n\n[Markdown version uploaded to S3: {result['s3_url']}]"
+                                  
                          else:
                               logger.warning(f"Pandoc extraction yielded minimal or error content ({len(text_content)} chars). Error: {text_content if text_content.startswith('[Error:') else 'None'}")
                               result['error'] = "Pandoc extraction failed or insufficient content."

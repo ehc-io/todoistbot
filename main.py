@@ -111,6 +111,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
             
             # Add downloaded video information if available
             downloaded_video = url_data.get('downloaded_video_path', '')
+            downloaded_markdown = url_data.get('downloaded_markdown_path', '')
             s3_url = url_data.get('s3_url', '')
 
             content.append(f"**URL**: [{url}]({url})  ")
@@ -123,6 +124,10 @@ def generate_markdown(tasks_data: List[dict]) -> str:
             # Add downloaded video info if available
             if downloaded_video:
                 content.append(f"**Local Folder**: {downloaded_video}  ")
+                
+            # Add downloaded markdown info if available
+            if downloaded_markdown:
+                content.append(f"**Markdown File**: {downloaded_markdown}  ")
             
             # Add S3 URL if available
             if s3_url:
@@ -154,7 +159,7 @@ def custom_scrape_url(
     url: str,
     text_model: str = "ollama/llama3.2:3b",
     vision_model: str = "ollama/llava:7b",
-    download_media: bool = False,
+    save_media_locally: bool = False,
     media_output_dir: str = "downloads",
     use_search_fallback: bool = True,
     s3_upload: bool = False,
@@ -181,7 +186,7 @@ def custom_scrape_url(
         url,
         text_model=text_model,
         vision_model=vision_model,
-        download_media=download_media,
+        save_media_locally=save_media_locally,
         media_output_dir=media_output_dir,
         use_search_fallback=use_search_fallback,
         s3_upload=s3_upload,
@@ -242,7 +247,7 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                 youtube_result = enhance_youtube_processing(
                     url, 
                     text_model=args.text_model,
-                    download_youtube_video=args.download_media,
+                    download_youtube_video=args.save_media_locally,
                     youtube_output_dir=args.output_dir,
                     s3_upload=args.s3_upload,
                     s3_bucket=args.s3_bucket
@@ -274,7 +279,7 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                         url,
                         text_model=args.text_model,
                         vision_model=args.vision_model,
-                        download_media=args.download_media,
+                        save_media_locally=args.save_media_locally,
                         media_output_dir=args.output_dir,
                         use_search_fallback=not args.no_search_fallback,
                         s3_upload=args.s3_upload,
@@ -287,6 +292,12 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                         # Log downloaded media if any
                         if scrape_result.get('downloaded_media_paths'):
                             logger.info(f"  ✓ Successfully downloaded {len(scrape_result['downloaded_media_paths'])} media files for: {url}")
+                        # Log downloaded markdown if any
+                        if scrape_result.get('downloaded_markdown_path'):
+                            logger.info(f"  ✓ Successfully saved markdown file for: {url} at {scrape_result['downloaded_markdown_path']}")
+                        # Log S3 upload if any
+                        if scrape_result.get('s3_url'):
+                            logger.info(f"  ✓ Successfully uploaded to S3: {scrape_result['s3_url']}")
                         else:
                             logger.info(f"  ✓ Successfully scraped: {url}")
                     elif scrape_result: # Scrape attempted, but failed or no content
@@ -342,7 +353,7 @@ def main():
     parser.add_argument('--screen', action='store_true', help='Display markdown output to screen instead of saving to file')
 
     # Unified media handling options
-    parser.add_argument('--download-media', action='store_true', help='Download media (videos/images) from successfully processed Twitter/X and YouTube links')
+    parser.add_argument('--save-media-locally', action='store_true', help='Download media (videos/images) from successfully processed Twitter/X and YouTube links')
     parser.add_argument('--output-dir', type=str, default='downloads', help='Output directory for all media downloads')
     parser.add_argument('--s3-upload', action='store_true', help='Upload media to S3 (works with or without local download)')
     parser.add_argument('--s3-bucket', type=str, default='2025-captured-notes', help='S3 bucket name for media uploads')
@@ -367,7 +378,7 @@ def main():
     logger.debug(f"Arguments: {args}")
 
     # --- Ensure Media Directory Exists (for Twitter and YouTube downloads) ---
-    if args.download_media:
+    if args.save_media_locally:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         logger.info(f"Media download enabled. Output directory: {args.output_dir}")
         
