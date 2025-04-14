@@ -21,6 +21,24 @@ import logging # Ensure logging is used
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("main")
 
+# Create a filter to ignore TeX math warnings
+class TexMathFilter(logging.Filter):
+    def filter(self, record):
+        # Skip any log messages about TeX math conversion
+        if "Could not convert TeX math" in record.getMessage():
+            return False
+        if "rendering as TeX" in record.getMessage():
+            return False
+        return True
+
+# Apply the filter to all loggers
+for logger_name in logging.Logger.manager.loggerDict:
+    logging_instance = logging.getLogger(logger_name)
+    logging_instance.addFilter(TexMathFilter())
+
+# Also apply filter to the root logger
+logging.getLogger().addFilter(TexMathFilter())
+
 class TaskStats:
     def __init__(self):
         self.total_tasks_considered = 0 # Tasks initially fetched
@@ -69,7 +87,28 @@ def generate_markdown(tasks_data: List[dict]) -> str:
     ]
 
     # Filter out None values or tasks that resulted in errors without content
-    valid_tasks = [task for task in tasks_data if task and task.get('processed_urls')]
+    valid_tasks = []
+    for task in tasks_data:
+        if not task:
+            continue
+            
+        # Skip tasks with LLM errors or no successfully processed URLs
+        has_error = False
+        if task.get('processed_urls'):
+            # Check if any URL has LLM errors
+            for url_data in task.get('processed_urls', []):
+                if 'error' in url_data and url_data.get('error'):
+                    if url_data.get('content', '').startswith('Error generating summary:') or 'Error calling LLM' in url_data.get('error', ''):
+                        logger.info(f"Excluding task with LLM error from report: {task.get('original_task', {}).get('content', 'Unknown Task')}")
+                        has_error = True
+                        break
+                # Check for content extraction errors
+                if url_data.get('content', '').startswith('[Error:'):
+                    has_error = True
+                    break
+        
+        if not has_error and task.get('processed_urls'):
+            valid_tasks.append(task)
 
     if not valid_tasks:
         content.append("No tasks with successfully scraped content were processed in this run.")
@@ -287,19 +326,25 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                     )
 
                     if scrape_result and scrape_result.get('content') and not scrape_result.get('error'):
-                        processed_url_results.append(scrape_result)
-                        any_scrape_successful = True
-                        # Log downloaded media if any
-                        if scrape_result.get('downloaded_media_paths'):
-                            logger.info(f"  ✓ Successfully downloaded {len(scrape_result['downloaded_media_paths'])} media files for: {url}")
-                        # Log downloaded markdown if any
-                        if scrape_result.get('downloaded_markdown_path'):
-                            logger.info(f"  ✓ Successfully saved markdown file for: {url} at {scrape_result['downloaded_markdown_path']}")
-                        # Log S3 upload if any
-                        if scrape_result.get('s3_url'):
-                            logger.info(f"  ✓ Successfully uploaded to S3: {scrape_result['s3_url']}")
+                        # Additional check for error messages in content
+                        content = scrape_result.get('content', '')
+                        if content.startswith('[Error:') or content.startswith('Error generating summary:') or 'Error calling LLM' in content:
+                            processed_url_results.append(scrape_result) # Keep result to show error in report
+                            logger.warning(f"  ⚠ LLM error in content for: {url} (Error message in content)")
                         else:
-                            logger.info(f"  ✓ Successfully scraped: {url}")
+                            processed_url_results.append(scrape_result)
+                            any_scrape_successful = True
+                            # Log downloaded media if any
+                            if scrape_result.get('downloaded_media_paths'):
+                                logger.info(f"  ✓ Successfully downloaded {len(scrape_result['downloaded_media_paths'])} media files for: {url}")
+                            # Log downloaded markdown if any
+                            if scrape_result.get('downloaded_markdown_path'):
+                                logger.info(f"  ✓ Successfully saved markdown file for: {url} at {scrape_result['downloaded_markdown_path']}")
+                            # Log S3 upload if any
+                            if scrape_result.get('s3_url'):
+                                logger.info(f"  ✓ Successfully uploaded to S3: {scrape_result['s3_url']}")
+                            else:
+                                logger.info(f"  ✓ Successfully scraped: {url}")
                     elif scrape_result: # Scrape attempted, but failed or no content
                         processed_url_results.append(scrape_result) # Keep result to show error in report
                         logger.warning(f"  ⚠ Failed to get valid content for: {url} (Error: {scrape_result.get('error', 'No content')})")
@@ -314,6 +359,23 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
 
     # --- Handle Task Update/Closure ---
     final_status = 'failed' if mark_as_failed else 'success'
+
+    # Check for LLM errors in the processed content
+    has_llm_error = False
+    for url_result in processed_url_results:
+        if 'error' in url_result and url_result.get('error'):
+            # Check if it's an LLM error in the content
+            if url_result.get('content', '').startswith('Error generating summary:') or 'Error calling LLM' in url_result.get('error', ''):
+                has_llm_error = True
+                logger.error(f"  ✕ LLM processing error detected for URL: {url_result.get('url')}")
+                mark_as_failed = True
+                final_status = 'failed'
+                break
+        
+    # Mark content extraction failures as failed
+    if any(result.get('content', '').startswith('[Error:') for result in processed_url_results):
+        mark_as_failed = True
+        final_status = 'failed'
 
     try:
         if mark_as_failed:
@@ -445,12 +507,21 @@ def main():
              if result:
                   # Track stats based on result status
                   if result['status'] == 'success' or result['status'] == 'closed':
-                       stats.successful_tasks += 1
-                       processed_tasks_data.append(result) # Only include successful tasks in report
+                       # Additional check: Don't count as success if there are LLM errors
+                       has_llm_error = False
+                       for url_data in result.get('processed_urls', []):
+                           if url_data.get('content', '').startswith('Error generating summary:') or 'Error calling LLM' in url_data.get('error', ''):
+                               logger.info(f"Re-classifying task as failed due to LLM error: {task.id}")
+                               has_llm_error = True
+                               stats.failed_tasks += 1
+                               break
+                           
+                       if not has_llm_error:
+                           stats.successful_tasks += 1
+                           processed_tasks_data.append(result) # Only include successful tasks in report
                   elif result['status'] == 'failed':
                        stats.failed_tasks += 1
-                       # Optionally include failed tasks in report for debugging?
-                       # processed_tasks_data.append(result)
+                       # Don't include failed tasks in report
                   elif result['status'] == 'skipped':
                        stats.skipped_tasks += 1
              else:

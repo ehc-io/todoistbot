@@ -709,11 +709,12 @@ Commit Activity: {commit_activity}
         logger.debug("Extracting content using Pandoc...")
         try:
             # Use text input directly if possible, avoiding temp file for performance
+            # Add extra_args to suppress warnings about TeX math
             text = pypandoc.convert_text(
                 html,
                 'plain',
                 format='html',
-                extra_args=['--wrap=none', '--strip-comments', '--reference-links'] # reference-links might help clean link clutter
+                extra_args=['--wrap=none', '--strip-comments', '--reference-links', '--quiet'] # Added --quiet to suppress warnings
             )
             # Basic cleaning
             text = re.sub(r'\n{3,}', '\n\n', text) # Collapse excessive newlines
@@ -806,9 +807,18 @@ Commit Activity: {commit_activity}
                 msg_type = str(msg.type)
         
         # Convert to lowercase for case-insensitive comparison
-        msg_text = msg_text.lower()
+        msg_text_lower = msg_text.lower()
         msg_type = msg_type.lower()
 
+        # First, filter out specific messages regardless of type
+        specific_ignore_patterns = [
+            "could not convert tex math",  # Filter TeX math conversion warnings
+            "rendering as tex"
+        ]
+        
+        if any(pattern in msg_text_lower for pattern in specific_ignore_patterns):
+            return False
+        
         # Comprehensive list of patterns to ignore
         ignore_patterns = [
             "failed to load resource", "net::err_", "status of 403",
@@ -821,7 +831,7 @@ Commit Activity: {commit_activity}
 
         # Only log critical errors that don't match any ignore patterns
         if msg_type == "error":
-            if any(pattern in msg_text for pattern in ignore_patterns):
+            if any(pattern in msg_text_lower for pattern in ignore_patterns):
                 return False  # Ignore common errors
             # Only return True for potentially important errors
             return True  # Log critical errors not in our ignore list
@@ -911,14 +921,15 @@ Commit Activity: {commit_activity}
                 # Check if it's a numeric timestamp (unix timestamp)
                 if str(timestamp).isdigit() or (isinstance(timestamp, (int, float))):
                     # Convert unix timestamp to datetime and format
-                    dt = datetime.fromtimestamp(int(timestamp))
+                    from datetime import datetime as dt_class  # Import locally to avoid name collision
+                    dt = dt_class.fromtimestamp(int(timestamp))
                     formatted_timestamp = dt.strftime('%Y-%m-%d %H:%M:%S UTC')
                 else:
                     # If it's already a string format, use it as is
                     formatted_timestamp = timestamp
             except Exception as e:
                 logger.warning(f"Error formatting timestamp {timestamp}: {e}")
-                formatted_timestamp = str(timestamp)  # Fallback to 
+                formatted_timestamp = str(timestamp)  # Fallback to string representation
     
         # Format the output with the requested style
         content_parts = [
