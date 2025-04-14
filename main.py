@@ -188,7 +188,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
             content.append("") # Spacer after each URL's content
 
         content.extend([
-            "--", 
+            "---", 
             ""
         ])
 
@@ -365,7 +365,7 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
     for url_result in processed_url_results:
         if 'error' in url_result and url_result.get('error'):
             # Check if it's an LLM error in the content
-            if url_result.get('content', '').startswith('Error generating summary:') or 'Error calling LLM' in url_result.get('error', ''):
+            if url_result.get('content', '').startswith('Error generating summary:') or 'Error calling LLM' in str(url_result.get('error', '')):
                 has_llm_error = True
                 logger.error(f"  ✕ LLM processing error detected for URL: {url_result.get('url')}")
                 mark_as_failed = True
@@ -510,7 +510,7 @@ def main():
                        # Additional check: Don't count as success if there are LLM errors
                        has_llm_error = False
                        for url_data in result.get('processed_urls', []):
-                           if url_data.get('content', '').startswith('Error generating summary:') or 'Error calling LLM' in url_data.get('error', ''):
+                           if url_data.get('content', '').startswith('Error generating summary:') or 'Error calling LLM' in str(url_data.get('error', '')):
                                logger.info(f"Re-classifying task as failed due to LLM error: {task.id}")
                                has_llm_error = True
                                stats.failed_tasks += 1
