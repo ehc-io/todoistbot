@@ -643,9 +643,6 @@ Commit Activity: {commit_activity}
                         # Add information about markdown file to the content response
                         if save_media_locally and 'downloaded_markdown_path' in result:
                             result['content'] += f"\n\n[GitHub repo markdown saved to: {result['downloaded_markdown_path']}]"
-                        
-                        if s3_upload and 's3_url' in result:
-                            result['content'] += f"\n\n[GitHub repo markdown uploaded to S3: {result['s3_url']}]"
                             
                     except Exception as e:
                         logger.error(f"Error saving/uploading GitHub repo markdown: {e}")
@@ -1348,9 +1345,6 @@ Commit Activity: {commit_activity}
                         # Add information about the PDF file to the content
                         if save_media_locally and 'downloaded_pdf_path' in result:
                             result['content'] += f"\n\n[PDF file saved to: {result['downloaded_pdf_path']}]"
-                        
-                        if s3_upload and 's3_url' in result:
-                            result['content'] += f"\n\n[PDF file uploaded to S3: {result['s3_url']}]"
                             
                     except Exception as e:
                         logger.error(f"Error saving/uploading PDF file: {e}")
@@ -1544,9 +1538,6 @@ Commit Activity: {commit_activity}
                               # Add information about markdown file to the content if available
                               if save_media_locally and 'downloaded_markdown_path' in result:
                                   result['content'] += f"\n\n[Markdown version saved to: {result['downloaded_markdown_path']}]"
-                              
-                              if s3_upload and 's3_url' in result:
-                                  result['content'] += f"\n\n[Markdown version uploaded to S3: {result['s3_url']}]"
                                   
                          else:
                               logger.warning(f"Pandoc extraction yielded minimal or error content ({len(text_content)} chars). Error: {text_content if text_content.startswith('[Error:') else 'None'}")
