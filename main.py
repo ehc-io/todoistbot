@@ -9,6 +9,9 @@ from todoist_api_python.api import TodoistAPI
 from datetime import datetime
 from pathlib import Path # Use pathlib for paths
 
+# Import the URL database manager
+from db_manager import URLDatabase
+
 # --- Import the refactored scraper ---
 from url_scraper import URLScraper
 # --- Import the YouTube extractor directly ---
@@ -47,6 +50,8 @@ class TaskStats:
         self.failed_tasks = 0           # Tasks attempted but failed (error or no content)
         self.skipped_tasks = 0          # Tasks skipped due to 'not-scrapeable' label
         self.tasks_remaining_in_capture = 0 # Tasks left in Capture project after run
+        self.skipped_urls = 0           # URLs skipped due to duplication
+        self.processed_urls = 0         # New URLs processed
 
     def print_summary(self):
         print("\n=== Task Processing Summary ===")
@@ -56,6 +61,8 @@ class TaskStats:
         print(f"Successfully processed (got content): {self.successful_tasks}")
         print(f"Failed processing (error/no content): {self.failed_tasks}")
         print(f"Tasks remaining in 'Capture':      {self.tasks_remaining_in_capture}")
+        print(f"URLs skipped (already processed): {self.skipped_urls}")
+        print(f"New URLs processed: {self.processed_urls}")
         print("==============================")
 
 class URLExtractor:
@@ -86,7 +93,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
         "",
     ]
 
-    # Filter out None values or tasks that resulted in errors without content
+    # Filter out None values or tasks that resulted in errors
     valid_tasks = []
     for task in tasks_data:
         if not task:
@@ -232,10 +239,19 @@ def custom_scrape_url(
         s3_bucket=s3_bucket
     )
 
-def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
+def process_single_task(api: TodoistAPI, task, args, url_db=None) -> Optional[dict]:
     """
     Processes a single Todoist task: extracts URLs, scrapes them, and returns results.
     Handles adding 'not-scrapeable' label and optionally closing the task.
+    
+    Args:
+        api: TodoistAPI client
+        task: Todoist task object
+        args: Command line arguments
+        url_db: URLDatabase instance for deduplication
+        
+    Returns:
+        Dictionary with processing results or None
     """
     NOT_SCRAPEABLE_LABEL = "not-scrapeable"
     task_id = task.id
@@ -265,12 +281,25 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
         logger.info(f"  Found URLs: {', '.join(all_urls)}")
         processed_url_results = []
         any_scrape_successful = False
+        any_url_processed = False  # Track if any URL was actually processed (not just skipped)
+        skipped_urls = 0
+        processed_urls = 0
         
         # Track already processed YouTube video IDs to avoid duplicates
         processed_youtube_ids = set()
 
         for url in all_urls:
             logger.debug(f"  Scraping URL: {url}")
+            
+            # Check if URL has been processed before
+            if url_db and url_db.url_exists(url):
+                logger.info(f"  Skipping already processed URL: {url}")
+                skipped_urls += 1
+                continue  # Skip this URL, move to next one
+                
+            # Mark that we're processing at least one URL
+            any_url_processed = True
+            processed_urls += 1
             
             # Handle YouTube URLs with enhanced processing
             if URLScraper.is_youtube_url(url):
@@ -306,8 +335,15 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                         logger.info(f"  ✓ Successfully uploaded video to S3: {youtube_result.get('s3_url')}")
                     else:
                         logger.info(f"  ✓ Successfully processed YouTube URL: {url}")
+                    
+                    # Add successfully processed URL to the database
+                    if url_db:
+                        url_db.add_url(url, task_id=task_id, success=True)
                 else:
                     logger.warning(f"  ⚠ Failed to process YouTube URL: {url} (Error: {youtube_result.get('error', 'Unknown error')})")
+                    # Track failed URL in database
+                    if url_db:
+                        url_db.add_url(url, task_id=task_id, success=False)
                 
             # Skip YouTube handling in URL scraper by using a custom processing wrapper
             else:
@@ -331,6 +367,9 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                         if content.startswith('[Error:') or content.startswith('Error generating summary:') or 'Error calling LLM' in content:
                             processed_url_results.append(scrape_result) # Keep result to show error in report
                             logger.warning(f"  ⚠ LLM error in content for: {url} (Error message in content)")
+                            # Track failed URL in database
+                            if url_db:
+                                url_db.add_url(url, task_id=task_id, success=False)
                         else:
                             processed_url_results.append(scrape_result)
                             any_scrape_successful = True
@@ -345,17 +384,48 @@ def process_single_task(api: TodoistAPI, task, args) -> Optional[dict]:
                                 logger.info(f"  ✓ Successfully uploaded to S3: {scrape_result['s3_url']}")
                             else:
                                 logger.info(f"  ✓ Successfully scraped: {url}")
+                            
+                            # Add successfully processed URL to the database
+                            if url_db:
+                                url_db.add_url(url, task_id=task_id, success=True)
                     elif scrape_result: # Scrape attempted, but failed or no content
                         processed_url_results.append(scrape_result) # Keep result to show error in report
                         logger.warning(f"  ⚠ Failed to get valid content for: {url} (Error: {scrape_result.get('error', 'No content')})")
+                        # Track failed URL in database
+                        if url_db:
+                            url_db.add_url(url, task_id=task_id, success=False)
                     else: # Scraper returned None (should be rare)
                         processed_url_results.append({'url': url, 'error': 'Scraper returned None', 'content': '[Error: Scraper failed unexpectedly]'})
                         logger.error(f"  ✕ Scraper returned None for URL: {url}")
+                        # Track failed URL in database
+                        if url_db:
+                            url_db.add_url(url, task_id=task_id, success=False)
                 except Exception as e:
                     processed_url_results.append({'url': url, 'error': f'Error during scraping: {str(e)}', 'content': f'[Error: {str(e)}]'})
                     logger.error(f"  ✕ Exception while scraping URL {url}: {e}")
+                    # Track failed URL in database
+                    if url_db:
+                        url_db.add_url(url, task_id=task_id, success=False)
 
-        mark_as_failed = not any_scrape_successful
+        # Update stats
+        if url_db:
+            args.stats.skipped_urls += skipped_urls
+            args.stats.processed_urls += processed_urls
+
+        # Determine if task should be marked as failed:
+        # 1. If no URLs were processed (all were skipped due to duplication) AND there were skipped URLs,
+        #    consider task successful (since all content was already processed in previous runs)
+        # 2. If some URLs were processed but none were successful, mark as failed
+        # 3. If some URLs were processed and at least one was successful, mark as success
+        if not any_url_processed and skipped_urls > 0:
+            # All URLs were skipped due to previous processing - consider this a success
+            mark_as_failed = False
+            # Set flag to indicate we had successful processing (from previous runs)
+            any_scrape_successful = True
+            logger.info(f"  All URLs in task {task_id} were already processed in previous runs.")
+        else:
+            # Some URLs were processed in this run - base success on their results
+            mark_as_failed = not any_scrape_successful
 
     # --- Handle Task Update/Closure ---
     final_status = 'failed' if mark_as_failed else 'success'
@@ -414,6 +484,12 @@ def main():
     parser.add_argument('--vision-model', type=str, default='ollama/llava:13b', help='Vision model (usage reduced, kept for potential future use)') # Updated default
     parser.add_argument('--screen', action='store_true', help='Display markdown output to screen instead of saving to file')
 
+    # URL deduplication arguments
+    parser.add_argument('--no-deduplication', action='store_true', 
+                       help='Disable URL deduplication (URL deduplication is enabled by default)')
+    parser.add_argument('--db-path', type=str, default='db/processed_urls.db', 
+                       help='Path to the SQLite database for URL deduplication (default: db/processed_urls.db)')
+
     # Unified media handling options
     parser.add_argument('--save-media-locally', action='store_true', help='Download media (videos/images) from successfully processed Twitter/X and YouTube links')
     parser.add_argument('--output-dir', type=str, default='downloads', help='Output directory for all media downloads')
@@ -453,9 +529,28 @@ def main():
             logger.error("Error: boto3 not installed. Install with: pip install boto3")
             return 1
 
+    # --- Initialize URL database ---
+    url_db = None
+    if not args.no_deduplication:
+        try:
+            url_db = URLDatabase(args.db_path)
+            logger.info(f"URL deduplication enabled. Database: {args.db_path}")
+            
+            # Get initial stats
+            stats = url_db.get_stats()
+            logger.info(f"URL database contains {stats['total']} URLs ({stats['successful']} successful, {stats['failed']} failed)")
+        except Exception as e:
+            logger.error(f"Failed to initialize URL database: {e}")
+            logger.warning("URL deduplication will be disabled")
+            url_db = None
+    else:
+        logger.info("URL deduplication disabled with --no-deduplication flag")
+
     try:
         api = TodoistAPI(get_api_key())
         stats = TaskStats()
+        # Add stats to args for easier access in functions
+        args.stats = stats
 
         # --- Fetch Tasks from "Capture" Project ---
         logger.info("Fetching projects to find 'Capture' project ID...")
@@ -503,7 +598,7 @@ def main():
         # --- Process Tasks ---
         processed_tasks_data = []
         for task in tasks_to_process_list:
-             result = process_single_task(api, task, args)
+             result = process_single_task(api, task, args, url_db)
              if result:
                   # Track stats based on result status
                   if result['status'] == 'success' or result['status'] == 'closed':
@@ -573,6 +668,19 @@ def main():
         final_tasks_in_capture = [t for t in api.get_tasks() if t.project_id == capture_project_id]
         stats.tasks_remaining_in_capture = len(final_tasks_in_capture)
         stats.print_summary()
+        
+        # Display URL database statistics if enabled
+        if url_db:
+            db_stats = url_db.get_stats()
+            print("\n=== URL Database Statistics ===")
+            print(f"Total URLs tracked: {db_stats['total']}")
+            print(f"Successfully processed URLs: {db_stats['successful']}")
+            print(f"Failed URLs: {db_stats['failed']}")
+            print("==============================")
+            
+            # Close database connection
+            url_db.close()
+            
         logger.info("Processing finished.")
         return 0
 
