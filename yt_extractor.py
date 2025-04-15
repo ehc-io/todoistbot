@@ -1063,15 +1063,23 @@ def enhance_youtube_processing(
         downloaded_video_path = None
         s3_url = None
         
-        # Case 1: Download video locally and possibly upload to S3
-        if download_youtube_video:
+        # Modified logic: Download video if either download_youtube_video or s3_upload is True
+        # This ensures we download the video when s3_upload is True, even if download_youtube_video is False
+        should_download_video = download_youtube_video or s3_upload
+        
+        if should_download_video:
             try:
                 logger.info(f"Downloading YouTube video: {url}")
                 download_result = fetcher.download_video(url)
                 if download_result and download_result.get('success'):
                     downloaded_video_path = download_result.get('filepath')
-                    result['downloaded_video_path'] = downloaded_video_path
-                    logger.info(f"Successfully downloaded video to: {downloaded_video_path}")
+                    
+                    # Only add the download path to the result if download_youtube_video was requested
+                    if download_youtube_video:
+                        result['downloaded_video_path'] = downloaded_video_path
+                        logger.info(f"Successfully downloaded video to: {downloaded_video_path}")
+                    else:
+                        logger.info(f"Successfully downloaded video for S3 upload: {downloaded_video_path}")
                     
                     # Upload to S3 if requested and not already uploaded during download
                     if s3_upload and not download_result.get('s3_url') and downloaded_video_path:
@@ -1087,24 +1095,19 @@ def enhance_youtube_processing(
                     # If S3 URL was already set during download
                     elif s3_upload and download_result.get('s3_url'):
                         result['s3_url'] = download_result.get('s3_url')
+                        
+                    # If we only downloaded for S3 upload and not for local storage, remove the local file
+                    if s3_upload and not download_youtube_video and downloaded_video_path and os.path.exists(downloaded_video_path):
+                        try:
+                            os.remove(downloaded_video_path)
+                            logger.info(f"Removed temporary video file after S3 upload: {downloaded_video_path}")
+                        except Exception as rm_e:
+                            logger.warning(f"Failed to remove temporary video file: {rm_e}")
                 else:
                     error_msg = download_result.get('error') if download_result else "Unknown download error"
                     logger.warning(f"Failed to download video: {error_msg}")
             except Exception as e:
                 logger.error(f"Error during video download: {e}")
-        
-        # Case 2: S3 upload requested without local download (create reference only)
-        elif s3_upload:
-            try:
-                logger.info(f"Creating S3 reference for YouTube video without local download: {url}")
-                s3_url = fetcher.direct_upload_to_s3(video_id, video_details.get('title', 'Unknown'))
-                if s3_url:
-                    result['s3_url'] = s3_url
-                    logger.info(f"Successfully created S3 reference for video: {s3_url}")
-                else:
-                    logger.warning(f"Failed to create S3 reference for video: {url}")
-            except Exception as e:
-                logger.error(f"Error creating S3 reference: {e}")
         
         # Format content
         content_parts = [
