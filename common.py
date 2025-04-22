@@ -75,7 +75,6 @@ def generate_markdown(tasks_data: List[dict]) -> str:
     content = [
         f"# Todoist Capture Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         # f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        # "---",
         "",
     ]
 
@@ -282,6 +281,34 @@ def generate_markdown(tasks_data: List[dict]) -> str:
                 
                 # Replace any remaining bare URLs
                 processed_content = url_pattern.sub(format_remaining_url, processed_content)
+                
+                # Format Twitter URLs in the "URLs in tweet:" section
+                twitter_urls_pattern = re.compile(r'URLs in tweet:\n((?:\s*- .*?\n)+)', re.MULTILINE)
+                
+                def format_twitter_urls(match):
+                    urls_section = match.group(1)
+                    lines = urls_section.split('\n')
+                    formatted_lines = []
+                    
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        
+                        # Match Twitter username pattern (e.g., /OpenAI, /llama_index)
+                        username_match = re.match(r'\s*- (/\w+)$', line)
+                        if username_match:
+                            username = username_match.group(1)
+                            # Remove the leading slash for the link text
+                            display_name = username.lstrip('/')
+                            formatted_lines.append(f" - [{display_name}](https://x.com{username})")
+                        else:
+                            # Keep other URLs as they are
+                            formatted_lines.append(line)
+                    
+                    return "URLs in tweet:\n" + "\n".join(formatted_lines) + "\n"
+                
+                # Apply the Twitter URL formatting
+                processed_content = twitter_urls_pattern.sub(format_twitter_urls, processed_content)
                 
                 scraped_content = processed_content
 
