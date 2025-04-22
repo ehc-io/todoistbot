@@ -73,9 +73,9 @@ def generate_markdown(tasks_data: List[dict]) -> str:
     Generate formatted markdown content from processed tasks data.
     """
     content = [
-        "# Todoist Capture Report",
-        f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "---",
+        f"# Todoist Capture Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        # f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        # "---",
         "",
     ]
 
@@ -146,7 +146,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
             downloaded_markdown = url_data.get('downloaded_markdown_path', '')
             s3_url = url_data.get('s3_url', '')
 
-            content.append(f"**URL**: [{url}]({url})  ")
+            # content.append(f"**URL**: [{url}]({url})  ")
             content.append(f"**Type**: {content_type.capitalize()}  ")
             if extraction_method: 
                 content.append(f"*Extraction Method: {extraction_method}*  ")
