@@ -12,35 +12,128 @@ from pathlib import Path # Use pathlib for paths
 # Import the URL database manager
 from db_manager import URLDatabase
 
+# Import helper functions
+from common import generate_markdown
+
 # --- Import the refactored scraper ---
 from url_scraper import URLScraper
 # --- Import the YouTube extractor directly ---
-from yt_extractor import YouTubeDataFetcher, get_transcript_summary, enhance_youtube_processing
+from yt_extractor import YouTubeDataFetcher, enhance_youtube_processing
 # ---
 
 import logging # Ensure logging is used
 
-# Configure logging for main script
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("main")
+def setup_logging(verbose=False):
+    """
+    Set up logging with appropriate filters and levels.
+    This centralizes all logging configuration for the application.
+    
+    Args:
+        verbose: Whether to enable DEBUG level logging
+    """
+    # Configure basic logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # --- Custom Log Filters ---
+    # Filter to ignore TeX math warnings
+    class TexMathFilter(logging.Filter):
+        def filter(self, record):
+            # Skip any log messages about TeX math conversion
+            message = record.getMessage()
+            if "Could not convert TeX math" in message or "rendering as TeX" in message:
+                return False
+            return True
+    
+    # Filter for Monaco Editor errors (Google Colab related)
+    class MonacoEditorFilter(logging.Filter):
+        def filter(self, record):
+            message = record.getMessage()
+            
+            # These patterns indicate Monaco editor/VS Code related errors
+            monaco_patterns = [
+                "monaco_editor", "vs/editor", "vs/css", "editor.main",
+                "gstatic.com/colaboratory", "colab", "monaco",
+                "modules that depend on it", "loading failed",
+                "could not find", "vs/base/browser/ui", 
+                "Critical browser error", "actionbar", "browser/ui"
+            ]
+            
+            # If this is a warning/error log and contains monaco patterns, filter it out
+            if record.levelno >= logging.WARNING:
+                if any(pattern in message.lower() for pattern in monaco_patterns):
+                    return False
+                
+                # Check for lists of VS Code modules (common in dependency lists)
+                if message.startswith("[vs/") or ("]" in message and "vs/" in message):
+                    return False
+                
+                # Filter long stack traces from browser errors
+                if "at Object." in message and "js:" in message:
+                    return False
+                
+                # Filter messages about dependencies
+                if "Here are the modules that depend on it:" in message:
+                    return False
+                    
+            return True
+    
+    # Filter for HTTP API requests
+    class HTTPRequestFilter(logging.Filter):
+        def filter(self, record):
+            message = record.getMessage()
+            
+            # Filter out successful HTTP requests
+            if "HTTP Request:" in message:
+                # Only keep error responses (4xx, 5xx)
+                if "HTTP/1.1 200" in message or "HTTP/1.1 201" in message or "HTTP/1.1 204" in message:
+                    return False
+                    
+            # Filter common API endpoints
+            if "api/show" in message or "api/generate" in message:
+                # Always filter successful responses
+                if "HTTP/1.1 200" in message:
+                    return False
+                
+            return True
+    
+    # --- Apply Filters ---
+    # Create filter instances
+    tex_filter = TexMathFilter()
+    monaco_filter = MonacoEditorFilter()
+    http_filter = HTTPRequestFilter()
+    
+    # Set log level based on verbosity
+    log_level = logging.DEBUG if verbose else logging.INFO
+    logging.getLogger().setLevel(log_level)
+    
+    # Apply filters to all existing loggers
+    for logger_name in logging.Logger.manager.loggerDict:
+        log_instance = logging.getLogger(logger_name)
+        log_instance.addFilter(tex_filter)
+        log_instance.addFilter(monaco_filter)
+        log_instance.addFilter(http_filter)
+    
+    # Apply filters to root logger
+    root_logger = logging.getLogger()
+    root_logger.addFilter(tex_filter)
+    root_logger.addFilter(monaco_filter)
+    root_logger.addFilter(http_filter)
+    
+    # --- Configure Specific Loggers ---
+    # Set higher levels for noisy libraries
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("pypandoc").setLevel(logging.INFO)
+    logging.getLogger("playwright").setLevel(logging.WARNING)  # Reduce Playwright noise
+    
+    # Browser console logging (extremely noisy)
+    browser_console_logger = logging.getLogger("playwright.browser.console")
+    browser_console_logger.setLevel(logging.ERROR)  # Only show errors, not warnings
+    
+    # Return the main application logger
+    return logging.getLogger("main")
 
-# Create a filter to ignore TeX math warnings
-class TexMathFilter(logging.Filter):
-    def filter(self, record):
-        # Skip any log messages about TeX math conversion
-        if "Could not convert TeX math" in record.getMessage():
-            return False
-        if "rendering as TeX" in record.getMessage():
-            return False
-        return True
-
-# Apply the filter to all loggers
-for logger_name in logging.Logger.manager.loggerDict:
-    logging_instance = logging.getLogger(logger_name)
-    logging_instance.addFilter(TexMathFilter())
-
-# Also apply filter to the root logger
-logging.getLogger().addFilter(TexMathFilter())
+# Initialize logging with default settings
+logger = setup_logging()
 
 class TaskStats:
     def __init__(self):
@@ -49,6 +142,7 @@ class TaskStats:
         self.successful_tasks = 0       # Tasks processed yielding content
         self.failed_tasks = 0           # Tasks attempted but failed (error or no content)
         self.skipped_tasks = 0          # Tasks skipped due to 'not-scrapeable' label
+        self.notebook_tasks_skipped = 0 # Tasks skipped due to containing notebook URLs
         self.tasks_remaining_in_capture = 0 # Tasks left in Capture project after run
         self.skipped_urls = 0           # URLs skipped due to duplication
         self.processed_urls = 0         # New URLs processed
@@ -58,6 +152,7 @@ class TaskStats:
         print(f"Tasks initially found in 'Capture': {self.total_tasks_considered}")
         print(f"Tasks attempted processing:        {self.tasks_to_process}")
         print(f"Tasks skipped ('not-scrapeable'):  {self.skipped_tasks}")
+        print(f"Tasks skipped (notebook URLs):     {self.notebook_tasks_skipped}")
         print(f"Successfully processed (got content): {self.successful_tasks}")
         print(f"Failed processing (error/no content): {self.failed_tasks}")
         print(f"Tasks remaining in 'Capture':      {self.tasks_remaining_in_capture}")
@@ -75,6 +170,12 @@ class URLExtractor:
         raw_urls = URLScraper.extract_urls(text)
         # Optional: Add more filtering here if needed (e.g., ignore certain domains)
         return [url for url in raw_urls if URLScraper.is_valid_url(url)]
+        
+    @staticmethod
+    def is_notebook_url(url: str) -> bool:
+        """Checks if URL is a Jupyter notebook or Google Colab."""
+        # Use URLScraper method 
+        return URLScraper.is_notebook_url(url)
 
 def get_api_key() -> str:
     api_key = os.getenv('TODOIST_API_KEY')
@@ -82,124 +183,6 @@ def get_api_key() -> str:
         raise ValueError("TODOIST_API_KEY environment variable not set")
     return api_key
 
-def generate_markdown(tasks_data: List[dict]) -> str:
-    """
-    Generate formatted markdown content from processed tasks data.
-    """
-    content = [
-        "# Todoist Capture Report",
-        f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "---",
-        "",
-    ]
-
-    # Filter out None values or tasks that resulted in errors
-    valid_tasks = []
-    for task in tasks_data:
-        if not task:
-            continue
-            
-        # Skip tasks with LLM errors or no successfully processed URLs
-        has_error = False
-        if task.get('processed_urls'):
-            # Check if any URL has LLM errors
-            for url_data in task.get('processed_urls', []):
-                if 'error' in url_data and url_data.get('error'):
-                    if url_data.get('content', '').startswith('Error generating summary:') or 'Error calling LLM' in url_data.get('error', ''):
-                        logger.info(f"Excluding task with LLM error from report: {task.get('original_task', {}).get('content', 'Unknown Task')}")
-                        has_error = True
-                        break
-                # Check for content extraction errors
-                if url_data.get('content', '').startswith('[Error:'):
-                    has_error = True
-                    break
-        
-        if not has_error and task.get('processed_urls'):
-            valid_tasks.append(task)
-
-    if not valid_tasks:
-        content.append("No tasks with successfully scraped content were processed in this run.")
-        return "\n".join(content)
-
-    for i, task_result in enumerate(valid_tasks):
-        task_content = task_result.get('original_task', {}).get('content', 'Unknown Task')
-        task_description = task_result.get('original_task', {}).get('description', '')
-        task_labels = task_result.get('original_task', {}).get('labels', [])
-
-        content.extend([
-            f"## {task_content}",
-            ""
-        ])
-
-        # Original Description
-        if task_description:
-            content.extend([
-                "### Original Description",
-                f"> {task_description.replace(chr(10), chr(10) + '> ')}", # Blockquote description
-                ""
-            ])
-
-        # Labels
-        if task_labels:
-            content.extend([
-                "### Labels",
-                ", ".join([f"`{label}`" for label in task_labels]),
-                ""
-            ])
-
-        # Processed URL Content
-        for url_data in task_result.get('processed_urls', []):
-            url = url_data.get('url', 'N/A')
-            scraped_content = url_data.get('content', '[No content extracted]')
-            content_type = url_data.get('type', 'unknown')
-            extraction_method = url_data.get('extraction_method', '') 
-            error = url_data.get('error')
-            
-            # Add downloaded video information if available
-            downloaded_video = url_data.get('downloaded_video_path', '')
-            downloaded_markdown = url_data.get('downloaded_markdown_path', '')
-            s3_url = url_data.get('s3_url', '')
-
-            content.append(f"**URL**: [{url}]({url})  ")
-            content.append(f"**Type**: {content_type.capitalize()}  ")
-            if extraction_method: 
-                content.append(f"*Extraction Method: {extraction_method}*  ")
-                content.append("  ")  # Spacer after each URL's content
-                # content.append("---")  # Separator for each URL
-            
-            # Add downloaded video info if available
-            if downloaded_video:
-                content.append(f"**Local Folder**: {downloaded_video}  ")
-                
-            # Add downloaded markdown info if available
-            if downloaded_markdown:
-                content.append(f"**Markdown File**: {downloaded_markdown}  ")
-            
-            # Add S3 URL if available
-            if s3_url:
-                # Extract week folder from s3_url (format: week_XX)
-                week_folder = "Unknown Week"
-                match = re.search(r'week_(\d+)', s3_url)
-                if match:
-                    week_folder = f"Week {match.group(1)}"
-                
-                content.append(f"**S3 Location**: [{s3_url}]({s3_url})  ")
-                # content.append(f"**S3 Folder Structure**: {week_folder}  ")
-                
-            content.append("")  # Extra spacing
-
-            if error:
-                content.append(f"**Error:** {error}")
-
-            content.append(scraped_content)
-            content.append("") # Spacer after each URL's content
-
-        content.extend([
-            "---", 
-            ""
-        ])
-
-    return "\n".join(content)
 
 def custom_scrape_url(
     url: str,
@@ -270,6 +253,21 @@ def process_single_task(api: TodoistAPI, task, args, url_db=None) -> Optional[di
     urls_from_description = URLExtractor.extract_relevant_urls(task_description)
     # Combine and deduplicate while preserving order roughly
     all_urls = list(dict.fromkeys(urls_from_content + urls_from_description))
+
+    # Check if any URL is a Jupyter notebook or Colab link (temporary debug mechanism)
+    has_notebook_url = False
+    for url in all_urls:
+        if URLExtractor.is_notebook_url(url):
+            logger.info(f"  Task contains a Jupyter notebook or Colab URL: {url}")
+            has_notebook_url = True
+            break
+            
+    if has_notebook_url:
+        logger.info(f"  Marking task {task_id} as '{NOT_SCRAPEABLE_LABEL}' (contains notebook URL)")
+        updated_labels = task_labels + [NOT_SCRAPEABLE_LABEL]
+        api.update_task(task_id=task_id, labels=updated_labels)
+        args.stats.notebook_tasks_skipped += 1
+        return {'status': 'skipped', 'task_id': task_id}
 
     if not all_urls:
         logger.info(f"  No valid URLs found in task {task_id}.")
@@ -503,14 +501,10 @@ def main():
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose DEBUG logging')
 
     args = parser.parse_args()
-
-    # --- Configure Logging Level ---
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.getLogger().setLevel(log_level) # Set root logger level
-    # Adjust levels for noisy libraries if needed
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("pypandoc").setLevel(logging.INFO)
-    logging.getLogger("playwright").setLevel(logging.INFO) # Playwright can be very verbose on DEBUG
+    
+    # Configure logging with verbosity from command line arguments
+    global logger
+    logger = setup_logging(verbose=args.verbose)
 
     logger.info("Starting Todoist processing...")
     logger.debug(f"Arguments: {args}")
