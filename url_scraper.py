@@ -26,7 +26,45 @@ from twitter_content_extractor import TweetExtractor
 from twitter_media_downloader import TwitterMediaDownloader
 # ---
 import logging # Ensure logging is configured if not already
+# Create a custom filter for HTTP requests
+class LogFilter(logging.Filter):
+    """Filter to control log messages"""
+    def filter(self, record):
+        message = record.getMessage()
+        
+        # 1. HTTP Request filtering - only show errors
+        if "HTTP Request:" in message:
+            # Allow error codes (4xx, 5xx)
+            if "HTTP/1.1 4" in message or "HTTP/1.1 5" in message:
+                return True
+            # Otherwise, filter out successful HTTP request logs
+            return False
+            
+        # 2. Filter out Monaco editor and Google Colab errors
+        if record.levelno == logging.WARNING and any(pattern in message.lower() 
+            for pattern in ["monaco", "vs/editor", "vs/css", "editor.main", "gstatic.com", 
+                           "colaboratory", "could not find", "failed to load"]):
+            return False
+            
+        # 3. Filter common successful API calls
+        if "api/show" in message and "HTTP/1.1 200" in message:
+            return False
+        if "api/generate" in message and "HTTP/1.1 200" in message:
+            return False
+            
+        # Let other logs through
+        return True
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Apply the filter to the logger
+logger = logging.getLogger(__name__)
+log_filter = LogFilter()
+logger.addFilter(log_filter)
+
+# Also apply filter to root logger to catch logs from imported modules
+root_logger = logging.getLogger()
+root_logger.addFilter(log_filter)
 
 
 logger = logging.getLogger(__name__)
@@ -268,6 +306,20 @@ class URLScraper:
             r'https?://m\.youtube\.com/playlist\?.*list=[\w-]+' # Mobile
         ]
         return any(re.match(p, url) for p in video_patterns + playlist_patterns)
+
+    @staticmethod
+    def is_notebook_url(url: str) -> bool:
+        """Check if URL is a Jupyter notebook or Google Colab link."""
+        # TEMPORARY DEBUG MECHANISM: Automatically mark notebook URLs as not-scrapeable
+        # Patterns for Jupyter notebooks and Google Colab
+        notebook_patterns = [
+            r'https?://(?:www\.)?github\.com/.*\.ipynb',  # Jupyter notebooks on GitHub
+            r'https?://(?:www\.)?colab\.research\.google\.com/.*',  # Google Colab notebooks
+            r'https?://(?:www\.)?kaggle\.com/.*(?:notebooks|code)',  # Kaggle notebooks
+            r'https?://nbviewer\.jupyter\.org/.*\.ipynb',  # Jupyter nbviewer
+            r'https?://(?:www\.)?deepnote\.com/.*'  # Deepnote notebooks
+        ]
+        return any(re.match(p, url) for p in notebook_patterns)
 
     # --- Keep PDF processing methods ---
     @staticmethod
@@ -810,7 +862,18 @@ Commit Activity: {commit_activity}
         # First, filter out specific messages regardless of type
         specific_ignore_patterns = [
             "could not convert tex math",  # Filter TeX math conversion warnings
-            "rendering as tex"
+            "rendering as tex",
+            "monaco",                      # Monaco editor messages (Google Colab related)
+            "vs/css",                      # Visual Studio CSS loading errors
+            "vs/editor",                   # VS editor related errors 
+            "failed to load resource",     # General resource loading failures
+            "cannot find",                 # Missing resource errors
+            "could not find",              # Another form of missing resource errors
+            "loading",                     # Loading state messages
+            "here are the modules",        # Dependency listing messages
+            "actionbar",                   # Monaco editor component
+            "colaboratory",                # Google Colab specific messages
+            "gstatic.com"                  # Google static content CDN
         ]
         
         if any(pattern in msg_text_lower for pattern in specific_ignore_patterns):
@@ -823,7 +886,12 @@ Commit Activity: {commit_activity}
             "duplicate key", "devtools failed", "[tiktok]",
             "unrecognized feature", "sandbox attribute", 
             "cannot read properties", "falha de execu", "user preferences",
-            "web-share"
+            "web-share", "dependency", "browser", "widget", "javascript",
+            "error loading", "cdn", "stylesheet", ".js", ".css",
+            "codemirror", "editor", "static", "cdn failed", "404",
+            "content security policy", "google analytics", "tracking",
+            "ad blocker", "ui", "interface", "cors", "http request",
+            "blocked by", "syntax error", "reference error", "null"
         ]
 
         # Only log critical errors that don't match any ignore patterns
@@ -1096,10 +1164,9 @@ Commit Activity: {commit_activity}
                     # Add S3 URLs to content if uploaded
                     if s3_upload and result.get('s3_urls'):
                         download_info.append("\nS3 Locations:")
-                        for s3_url in result.get('s3_urls')[:3]:  # Only show first 3 to avoid clutter
+                        # Display all S3 URLs, not just the first 3
+                        for s3_url in result.get('s3_urls'):
                             download_info.append(f"- {s3_url}")
-                        if len(result.get('s3_urls')) > 3:
-                            download_info.append(f"- ... and {len(result.get('s3_urls')) - 3} more")
                     
                     result['content'] += "\n\n" + "\n".join(download_info)
                     logger.info(f"Successfully processed {len(downloaded_files_info)} media files")
@@ -1389,7 +1456,7 @@ Commit Activity: {commit_activity}
                 page = context.new_page()
 
                 # Setup console/error logging
-                page.on("pageerror", lambda err: logger.warning(f"Page JS error ({cleaned_url}): {str(err)}"))
+                page.on("pageerror", lambda err: logger.warning(f"Page JS error ({cleaned_url}): {str(err)}") if not URLScraper.is_ignorable_browser_error(str(err)) else None)
 
                 def safe_console_handler(msg):
                     try:
@@ -1397,8 +1464,11 @@ Commit Activity: {commit_activity}
                         if URLScraper.filter_console_message(msg):
                             # Get message text and type safely
                             msg_text = str(msg.text) if not callable(getattr(msg, 'text', None)) else msg.text()
-                            msg_type = str(msg.type) if not callable(getattr(msg, 'type', None)) else msg.type()
-                            logger.warning(f"Critical browser error: {msg_text}")  # Use logger instead of print
+                            
+                            # Additional filter for Monaco editor related errors
+                            if not URLScraper.is_ignorable_browser_error(msg_text):
+                                msg_type = str(msg.type) if not callable(getattr(msg, 'type', None)) else msg.type()
+                                logger.warning(f"Critical browser error: {msg_text}")  # Only log truly critical errors
                     except Exception as e:
                         # Silently fail if console handler has issues
                         pass
@@ -1604,3 +1674,25 @@ Commit Activity: {commit_activity}
 
 
         return result
+
+    @staticmethod
+    def is_ignorable_browser_error(error_text):
+        """
+        Additional filter for browser errors that should be ignored.
+        Specifically targets Monaco Editor, VS Code components, and Google Colab errors.
+        """
+        if not error_text:
+            return True
+            
+        # Common patterns in Monaco/VS Code/Colab errors
+        monaco_patterns = [
+            "monaco", "vs/editor", "vs/css", "editor.main", 
+            "gstatic.com", "colaboratory", "colab", 
+            "could not find", "failed to load", 
+            "modules that depend on it", "actionbar", "browser/ui",
+            "selectBox", "contextview", "inputbox", "scrollbar"
+        ]
+        
+        # Check if any pattern is in the error text
+        error_text_lower = error_text.lower()
+        return any(pattern in error_text_lower for pattern in monaco_patterns)
