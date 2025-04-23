@@ -314,7 +314,7 @@ def generate_markdown(tasks_data: List[dict]) -> str:
 
             # Add custom media links to content if any exist and not already in the content
             if media_links and (s3_url not in scraped_content if s3_url else True):
-                content.append("Media:")
+                # content.append("Media:")
                 content.extend(media_links)
                 content.append("")  # Extra spacing
 
