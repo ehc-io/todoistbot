@@ -1213,8 +1213,6 @@ def enhance_youtube_processing(
         
         # Format content
         content_parts = [
-            f"Title: {video_details.get('title', 'N/A')}  ",
-            "---",
             f"Views: {video_details.get('view_count', 'N/A')}  ",
             f"Likes: {video_details.get('like_count', 'N/A')}  ",
             f"Duration: {video_details.get('duration', 'N/A')}  ",
