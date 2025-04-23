@@ -273,6 +273,12 @@ class YouTubeDataFetcher:
         if not youtube_url:
             return None
             
+        # Check if it's a playlist URL first (to provide better error handling)
+        if 'list=' in youtube_url and not 'v=' in youtube_url:
+            # This is a pure playlist URL without a video ID
+            logger.info(f"URL appears to be a playlist, not a single video: {youtube_url}")
+            return None
+            
         # Handle youtu.be short URLs
         if 'youtu.be' in youtube_url:
             parsed_url = urlparse(youtube_url)
@@ -292,6 +298,32 @@ class YouTubeDataFetcher:
             elif '/embed/' in parsed_url.path:
                 return parsed_url.path.split('/embed/')[1]
                 
+        return None
+    
+    @staticmethod
+    def extract_playlist_id(youtube_url: str) -> Optional[str]:
+        """Extract the playlist ID from a YouTube URL.
+        
+        Supports various YouTube playlist URL formats:
+        - https://www.youtube.com/playlist?list=PLAYLIST_ID
+        - https://www.youtube.com/watch?v=VIDEO_ID&list=PLAYLIST_ID
+        
+        Args:
+            youtube_url: Full YouTube URL
+            
+        Returns:
+            Playlist ID or None if extraction fails
+        """
+        if not youtube_url:
+            return None
+            
+        # Extract list parameter from URL query
+        parsed_url = urlparse(youtube_url)
+        if parsed_url.hostname in ('www.youtube.com', 'youtube.com', 'm.youtube.com'):
+            query_params = parse_qs(parsed_url.query)
+            if 'list' in query_params:
+                return query_params['list'][0]
+            
         return None
     
     def initialize_youtube_client(self) -> None:
@@ -939,6 +971,68 @@ class YouTubeDataFetcher:
             'results': results
         }
 
+    def get_playlist_details(self, playlist_id: str, max_items: int = 10) -> Optional[Dict[str, Any]]:
+        """Fetch playlist details and items using YouTube API.
+        
+        Args:
+            playlist_id: YouTube playlist ID
+            max_items: Maximum number of playlist items to fetch (default: 10)
+            
+        Returns:
+            Dictionary containing playlist details or None if error occurs
+        """
+        if not self.api_key_valid or not self.youtube:
+            logger.error("YouTube API key is invalid or client not initialized.")
+            return None
+        
+        try:
+            # Get playlist metadata
+            playlist_request = self.youtube.playlists().list(
+                part="snippet,contentDetails",
+                id=playlist_id
+            )
+            playlist_response = playlist_request.execute()
+
+            if not playlist_response.get('items'):
+                logger.warning(f"No playlist details found for YouTube playlist ID: {playlist_id}")
+                return None
+
+            playlist = playlist_response['items'][0]
+            snippet = playlist.get('snippet', {})
+
+            # Get playlist items (videos)
+            items_request = self.youtube.playlistItems().list(
+                part="snippet",
+                playlistId=playlist_id,
+                maxResults=min(max_items, 50)  # API max is 50
+            )
+            items_response = items_request.execute()
+
+            videos = []
+            for item in items_response.get('items', []):
+                video_snippet = item.get('snippet', {})
+                resource_id = video_snippet.get('resourceId', {})
+                if video_snippet and resource_id.get('kind') == 'youtube#video':
+                    videos.append({
+                        'title': video_snippet.get('title', 'N/A'),
+                        'video_id': resource_id.get('videoId'),
+                        'position': video_snippet.get('position', -1) + 1
+                    })
+
+            return {
+                'title': snippet.get('title', 'N/A'),
+                'description': snippet.get('description', ''),
+                'channel_title': snippet.get('channelTitle', 'N/A'),
+                'channel_id': snippet.get('channelId', ''),
+                'published_at': snippet.get('publishedAt', ''),
+                'item_count': playlist.get('contentDetails', {}).get('itemCount', len(videos)),
+                'videos_preview': videos
+            }
+
+        except Exception as e:
+            logger.error(f"Error fetching YouTube playlist details for ID {playlist_id}: {str(e)}")
+            return None
+
 def get_transcript_summary(transcript_text: str, text_model: str) -> str:
     """
     Get summary of YouTube transcript using LLM.
@@ -975,7 +1069,7 @@ def enhance_youtube_processing(
     Enhanced YouTube processing using YouTubeDataFetcher from yt_extractor.py
     
     Args:
-        url: YouTube URL
+        url: YouTube URL (video or playlist)
         text_model: Text model for summarization
         download_youtube_video: Whether to download the video
         youtube_output_dir: Output directory for downloaded videos
@@ -1018,7 +1112,15 @@ def enhance_youtube_processing(
                     # Continue processing but note the error
                     result['error'] = 'Failed to configure S3 upload'
         
-        # Extract video ID
+        # First, check if the URL is a playlist
+        playlist_id = fetcher.extract_playlist_id(url)
+        
+        # Process as playlist if playlist_id is found
+        if playlist_id:
+            logger.info(f"Processing YouTube URL as playlist with ID: {playlist_id}")
+            return process_youtube_playlist(fetcher, url, playlist_id, text_model)
+        
+        # If not a playlist, proceed with video processing
         video_id = fetcher.extract_video_id(url)
         if not video_id:
             logger.error(f"Could not extract video ID from URL: {url}")
@@ -1157,7 +1259,88 @@ def enhance_youtube_processing(
     except Exception as e:
         logger.error(f"Error processing YouTube URL {url}: {e}", exc_info=True)
         result['error'] = f"Processing error: {str(e)}"
-        result['content'] = f"[Error: Failed to process YouTube content: {str(e)}]"
+        result['content'] = f"[Error: {str(e)}]"
+        return result
+
+def process_youtube_playlist(fetcher, url, playlist_id, text_model):
+    """
+    Process a YouTube playlist
+    
+    Args:
+        fetcher: YouTubeDataFetcher instance
+        url: Original playlist URL
+        playlist_id: YouTube playlist ID
+        text_model: Text model for summarization
+        
+    Returns:
+        Dictionary with processed playlist data
+    """
+    result = {
+        'url': url,
+        'type': 'youtube_playlist',
+        'content': None,
+        'error': None,
+        'extraction_method': 'youtube_extractor'
+    }
+    
+    try:
+        # Get playlist details
+        playlist_details = fetcher.get_playlist_details(playlist_id, max_items=10)  # Get first 10 videos
+        
+        if not playlist_details:
+            logger.error(f"Failed to fetch playlist details for ID: {playlist_id}")
+            result['error'] = 'Failed to fetch playlist details'
+            result['content'] = "[Error: Could not retrieve playlist information]"
+            return result
+            
+        # Format content
+        content_parts = [
+            f"Playlist: {playlist_details.get('title', 'N/A')}  ",
+            "---",
+            f"Channel: {playlist_details.get('channel_title', 'N/A')}  ",
+            f"Total Videos: {playlist_details.get('item_count', 'N/A')}  ",
+            f"Published: {playlist_details.get('published_at', 'N/A')}  ",
+            "   ",
+            "---",
+        ]
+        
+        # Add description if available
+        description = playlist_details.get('description', '')
+        if description:
+            content_parts.append("Description:")
+            # Truncate long descriptions
+            if len(description) > 300:
+                content_parts.append(description[:297] + "...")
+            else:
+                content_parts.append(description)
+            content_parts.append("---")
+            
+        # Add videos preview
+        videos = playlist_details.get('videos_preview', [])
+        if videos:
+            content_parts.append(f"Videos in playlist (showing first {len(videos)} of {playlist_details.get('item_count', 'N/A')}):")
+            content_parts.append("")
+            
+            for i, video in enumerate(videos, 1):
+                title = video.get('title', 'N/A')
+                video_id = video.get('video_id', '')
+                position = video.get('position', i)
+                
+                video_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else 'N/A'
+                content_parts.append(f"{position}. [{title}]({video_url})  ")
+                
+            content_parts.append("---")
+        else:
+            content_parts.append("No videos found in playlist")
+            
+        # Combine all parts
+        result['content'] = "\n".join(content_parts)
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error processing YouTube playlist {url}: {e}", exc_info=True)
+        result['error'] = f"Processing error: {str(e)}"
+        result['content'] = f"[Error: {str(e)}]"
         return result
 
 def parse_arguments():
