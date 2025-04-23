@@ -14,10 +14,13 @@ const { chromium } = require('playwright');
 
 // Configuration variables
 const PAGE_LOAD_TIMEOUT = 3000;
-const LOGIN_WAIT_TIMEOUT = 10000;
+const LOGIN_WAIT_TIMEOUT = 15000;
 const FORM_INTERACTION_DELAY = 1500;
 const SELECTOR_TIMEOUT = 3000;
-const TWEET_WAIT_TIMEOUT = 2000;
+// const TWEET_WAIT_TIMEOUT = 2000;
+
+// Control whether to take login screenshots
+const LOGIN_SCREENSHOTS = true;
 
 // Session configuration
 const SESSION_DATA_DIR = "session-data";
@@ -53,6 +56,8 @@ function getFormattedTimestamp() {
  * @returns {Promise<void>}
  */
 async function takeScreenshot(page, filename) {
+  if (!LOGIN_SCREENSHOTS) return;
+  
   const screenshotsDir = 'screenshots';
   ensureDirectoryExists(screenshotsDir); // This ensures the directory exists
   
@@ -145,11 +150,25 @@ async function performLogin(context) {
     await page.fill('input[name="password"]', password);
     await page.waitForTimeout(FORM_INTERACTION_DELAY);
 
-    // Click Login button
+    // Wait for login button to be visible
     await page.waitForSelector('button[data-testid="LoginForm_Login_Button"]', { state: 'visible', timeout: SELECTOR_TIMEOUT });
+    
+    // Take screenshot before clicking login button
+    await takeScreenshot(page, 'before-login-click');
+    
+    // Click Login button
     await page.click('button[data-testid="LoginForm_Login_Button"]');
     
+    // Wait for navigation to complete
+    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: LOGIN_WAIT_TIMEOUT }).catch(() => {
+      Logger.log('Navigation timeout occurred, but continuing...');
+    });
+    
+    // Additional wait to ensure page is fully loaded
     await page.waitForTimeout(LOGIN_WAIT_TIMEOUT);
+    
+    // Take screenshot after login
+    await takeScreenshot(page, 'after-login');
 
     // Verify login success
     const isLoginSuccessful = await page.evaluate(() => {
@@ -157,6 +176,8 @@ async function performLogin(context) {
     });
 
     if (!isLoginSuccessful) {
+      // Take screenshot of failed login state
+      await takeScreenshot(page, 'login-failed');
       throw new Error('Login failed: Could not verify Home page after login attempt');
     }
     
