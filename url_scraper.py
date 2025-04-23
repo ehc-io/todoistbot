@@ -586,7 +586,6 @@ class URLScraper:
                 formatted_output = f"""
 Title: {repo_title}  
     
-Summary:   
 {summary}  
 
 Technologies: {technologies}  
