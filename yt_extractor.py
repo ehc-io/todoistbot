@@ -1234,7 +1234,7 @@ def enhance_youtube_processing(
             content_parts.append(f"Full transcript length: {len(transcript_text)} characters  ")
             content_parts.append("  ")
             if transcript_summary:
-                content_parts.append(f"Transcript Summary: {transcript_summary}  ")
+                content_parts.append(transcript_summary)
                 content_parts.append("  ")
         else:
             content_parts.append("Transcript: Not available")
