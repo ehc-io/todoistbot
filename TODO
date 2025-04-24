@@ -1,6 +1,9 @@
 TODO
 [ ] To support pt-br Youtube transcriptions 
-
+[ ] include these URLs as YouTube videos as well: https://m.youtube.com/watch?v=AKMuA_TVz3A
+[ ] include those URLs as PDFs: https://arxiv.org/pdf/2504.09522
+[ ] include this UA or come up with a faallback mechanism for URLs not loading: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36
+[ ] scrape tweet articles: https://x.com/karpathy/status/1909308143156240538
 
 
 
