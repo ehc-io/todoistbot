@@ -158,69 +158,59 @@ class TwitterAPIClient:
     def fetch_tweet_data_api(self, tweet_id: str) -> Optional[Dict[str, Any]]:
         """
         Fetches detailed tweet data using the GraphQL API.
-        Exactly matches the parameters from the original working script.
+        Uses parameters derived from observed working requests.
         """
         logger.info(f"Fetching tweet data via API for ID: {tweet_id}")
         if not self._get_tokens():
             logger.error("Cannot fetch tweet data: Auth tokens not available.")
             return None
 
-        # Ensure tokens are available
         if self.auth_tokens is None:
             logger.error("Auth tokens tuple is None, cannot proceed.")
             return None
-        
+
         auth_token, csrf_token, bearer_token = self.auth_tokens
 
-        # API Endpoint (same as original script)
-        api_url = "https://x.com/i/api/graphql/zJvfJs3gSbrVhC0MKjt_OQ/TweetDetail"
-        
-        # Use EXACTLY the same parameters as the original script
+        # --- UPDATED API Endpoint and Parameters (Based on Burp Capture Apr 2025) ---
+        api_url = "https://x.com/i/api/graphql/0hWvDhmW8YQ-S_ib3azIrw/TweetResultByRestId"
+
         params = {
             "variables": json.dumps({
-                "focalTweetId": tweet_id,
-                "with_rux_injections": False,
-                "includePromotedContent": False,
+                "tweetId": tweet_id, # Changed from focalTweetId
                 "withCommunity": False,
-                "withQuickPromoteEligibilityTweetFields": False,
-                "withBirdwatchNotes": False,
-                "withVoice": False,
-                "withV2Timeline": True
+                "includePromotedContent": False,
+                "withVoice": False
+                # Removed several older/unnecessary params like with_rux_injections, withV2Timeline etc.
             }),
-            "features": json.dumps({
-                "rweb_tipjar_consumption_enabled": False,
-                "responsive_web_graphql_exclude_directive_enabled": False,
-                "verified_phone_label_enabled": False,
-                "creator_subscriptions_tweet_preview_api_enabled": False,
-                "responsive_web_graphql_timeline_navigation_enabled": False,
-                "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
-                "communities_web_enable_tweet_community_results_fetch": False,
-                "c9s_tweet_anatomy_moderator_badge_enabled": False,
-                "articles_preview_enabled": True,
-                "tweetypie_unmention_optimization_enabled": False,
-                "responsive_web_edit_tweet_api_enabled": False,
-                "graphql_is_translatable_rweb_tweet_is_translatable_enabled": False,
-                "view_counts_everywhere_api_enabled": False,
-                "longform_notetweets_consumption_enabled": False,
-                "responsive_web_twitter_article_tweet_consumption_enabled": False,
-                "tweet_awards_web_tipping_enabled": False,
-                "creator_subscriptions_quote_tweet_preview_enabled": False,
-                "freedom_of_speech_not_reach_fetch_enabled": False,
-                "standardized_nudges_misinfo": False,
-                "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": False,
-                "tweet_with_visibility_results_prefer_gql_media_interstitial_enabled": False,
-                "rweb_video_timestamps_enabled": False,
-                "longform_notetweets_rich_text_read_enabled": False,
-                "longform_notetweets_inline_media_enabled": False,
-                "responsive_web_enhance_cards_enabled": False
+            "features": json.dumps({ # UPDATED features based on Burp capture
+                "creator_subscriptions_tweet_preview_api_enabled": False, # Was false, now false
+                "tweetypie_unmention_optimization_enabled": True, # Was false, now true
+                "responsive_web_edit_tweet_api_enabled": True, # Was false, now true
+                "graphql_is_translatable_rweb_tweet_is_translatable_enabled": False, # Was false, now false
+                "view_counts_everywhere_api_enabled": False, # Was false, now false
+                "longform_notetweets_consumption_enabled": True, # Was false, now true
+                "responsive_web_twitter_article_tweet_consumption_enabled": False, # Was false, now false
+                "tweet_awards_web_tipping_enabled": False, # Was false, now false
+                "freedom_of_speech_not_reach_fetch_enabled": True, # Was false, now true
+                "standardized_nudges_misinfo": False, # Was false, now false
+                "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True, # Was false, now true
+                "longform_notetweets_rich_text_read_enabled": False, # Was false, now false
+                "longform_notetweets_inline_media_enabled": False, # Was false, now false
+                "responsive_web_graphql_exclude_directive_enabled": True, # Was false, now true
+                "verified_phone_label_enabled": False, # Was false, now false
+                "responsive_web_media_download_video_enabled": False, # New parameter
+                "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False, # Was false, now false
+                "responsive_web_graphql_timeline_navigation_enabled": False, # Was false, now false
+                "responsive_web_enhance_cards_enabled": False # Was false, now false
+                # Several old features removed
             }),
-            "fieldToggles": json.dumps({
+            "fieldToggles": json.dumps({ # Kept same as before, matches Burp
                 "withArticleRichContentState": False,
                 "withAuxiliaryUserLabels": False
             })
         }
-        
-        # Use EXACTLY the same headers as the original script
+        # --- END UPDATED PARAMETERS ---
+
         headers = {
             "Host": "x.com",
             "Cookie": f"auth_token={auth_token}; ct0={csrf_token}",
@@ -228,62 +218,92 @@ class TwitterAPIClient:
             "Authorization": f"Bearer {bearer_token}",
             "X-Csrf-Token": csrf_token,
             "X-Twitter-Auth-Type": "OAuth2Session",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            # Update User-Agent slightly to match Burp capture if desired, though current one likely works
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
             "Content-Type": "application/json",
             "Accept": "*/*"
+            # Add other headers from Burp if needed, but these are likely sufficient
         }
-        
+
         try:
-            # Make the API request
+            logger.debug(f"Attempting API request to: {api_url} with params: {params}")
             response = requests.get(api_url, params=params, headers=headers, timeout=15)
-            response.raise_for_status()
-            
+
+            logger.debug(f"API Request URL (final): {response.url}")
+
+            response.raise_for_status() # Will raise HTTPError for 4xx/5xx
+
             data = response.json()
             logger.info("Successfully fetched tweet data from API.")
-            
-            # Basic validation of expected structure
-            if 'data' not in data or 'threaded_conversation_with_injections_v2' not in data['data']:
-                logger.warning("API response structure may have changed. Missing expected data paths.")
+
+            # --- UPDATED Validation for new response structure ---
+            if 'data' not in data or 'tweetResult' not in data['data'] or 'result' not in data['data']['tweetResult']:
+                logger.warning("API response structure may have changed. Missing expected 'data.tweetResult.result' path.")
                 logger.debug(f"Response keys: {list(data.keys())}")
                 if 'data' in data:
                     logger.debug(f"Data keys: {list(data['data'].keys())}")
-            
+            # --- END UPDATED Validation ---
+
             return data
-            
+
         except requests.exceptions.HTTPError as e:
-            logger.error(f"API request failed with HTTP status {e.response.status_code}")
+            # Existing enhanced logging...
+            logger.error(f"API request failed with HTTP status {e.response.status_code} for URL: {e.request.url}")
             try:
+                response_text = e.response.text
+                logger.error(f"Raw API error response text: {response_text}")
                 error_details = e.response.json()
-                logger.error(f"API error details: {json.dumps(error_details)[:500]}")
-            except:
-                logger.error(f"API error response: {e.response.text[:500]}")
+                logger.error(f"API error details (JSON parsed): {json.dumps(error_details)}")
+            except json.JSONDecodeError:
+                 logger.error("API error response was not valid JSON.")
+            except Exception as parse_e:
+                logger.error(f"Could not parse API error response: {parse_e}")
             return None
         except Exception as e:
-            logger.error(f"Failed to fetch tweet data: {e}")
+            logger.error(f"Failed to fetch tweet data for tweet_id {tweet_id}: {e}", exc_info=True)
             return None
 
     def extract_media_urls_from_api_data(self, tweet_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Extracts all media URLs (images, GIFs, videos) from the tweet data.
-        Follows exactly the same path traversal as the original script.
+        Extracts all media URLs (images, GIFs, videos) from the tweet data,
+        using the path observed in TweetResultByRestId responses.
         """
         logger.info("Extracting media URLs from tweet data")
-        
         media_items = []
-        
+
         try:
-            # Navigate the nested structure to find the tweet information - EXACT same path as original
-            tweet_result = tweet_data['data']['threaded_conversation_with_injections_v2']['instructions'][0]['entries'][0]['content']['itemContent']['tweet_results']['result']
-            
-            # Extract the extended entities which contain media
-            extended_entities = tweet_result.get('legacy', {}).get('extended_entities', {})
-            
-            if not extended_entities or 'media' not in extended_entities:
-                logger.warning("No media found in tweet")
+            # --- UPDATED Path Traversal (Based on Burp Response Apr 2025) ---
+            # Old Path: ['data']['threaded_conversation_with_injections_v2']['instructions'][0]['entries'][0]['content']['itemContent']['tweet_results']['result']
+            # New Path: ['data']['tweetResult']['result']
+            if 'data' not in tweet_data or 'tweetResult' not in tweet_data['data'] or 'result' not in tweet_data['data']['tweetResult']:
+                 logger.error("Could not find 'data.tweetResult.result' in API response for media extraction.")
+                 return []
+
+            tweet_result = tweet_data['data']['tweetResult']['result']
+
+            # Check if the result itself indicates an issue (e.g., tweet not found, though unlikely if API returned 200)
+            if tweet_result.get('__typename') == 'TweetUnavailable' or not tweet_result.get('legacy'):
+                logger.warning(f"Tweet result indicates unavailability or missing legacy data: {tweet_result.get('reason', 'Unknown reason')}")
                 return []
-            
-            # Process all media items
-            for index, media in enumerate(extended_entities['media']):
+            # --- END UPDATED Path Traversal ---
+
+
+            # The rest of the logic relies on the 'legacy' structure which seems consistent in the Burp response
+            legacy_data = tweet_result.get('legacy', {})
+            extended_entities = legacy_data.get('extended_entities', {})
+
+            if not extended_entities or 'media' not in extended_entities:
+                # Check if media might be in top-level entities for simple images
+                entities = legacy_data.get('entities', {})
+                if entities and 'media' in entities:
+                     logger.info("Found media in legacy.entities (likely simple image).")
+                     extended_entities = entities # Treat entities.media like extended_entities.media
+                else:
+                     logger.info("No extended_entities.media or entities.media found in tweet legacy data.")
+                     return [] # Return empty list if no media found
+
+            # Process all media items (logic remains the same as it depends on the 'media' array structure)
+            for index, media in enumerate(extended_entities.get('media', [])): # Use .get for safety
                 media_type = media.get('type', '')
                 media_item = {
                     'type': media_type,
@@ -291,55 +311,58 @@ class TwitterAPIClient:
                     'url': None,
                     'extension': None
                 }
-                
+
                 if media_type == 'photo':
-                    # For photos, use the highest quality version
                     media_item['url'] = media.get('media_url_https', '')
-                    media_item['extension'] = 'jpg'  # Most Twitter images are JPGs
-                    
+                    media_item['extension'] = 'jpg'
                 elif media_type == 'video':
-                    # For videos, find the highest quality MP4
                     video_info = media.get('video_info', {})
                     variants = video_info.get('variants', [])
-                    
-                    # Find the highest quality MP4 variant
                     mp4_variants = [v for v in variants if v.get('content_type') == 'video/mp4']
                     if mp4_variants:
                         best_variant = max(mp4_variants, key=lambda v: v.get('bitrate', 0))
                         media_item['url'] = best_variant['url']
                         media_item['extension'] = 'mp4'
-                    
                 elif media_type == 'animated_gif':
-                    # For GIFs, get the MP4 version (Twitter converts GIFs to MP4)
                     video_info = media.get('video_info', {})
                     variants = video_info.get('variants', [])
-                    
                     if variants:
-                        # There's usually only one variant for GIFs
                         media_item['url'] = variants[0]['url']
-                        media_item['extension'] = 'mp4'  # Twitter serves GIFs as MP4s
-                
-                # Add to the list if we found a URL
+                        media_item['extension'] = 'mp4'
+
                 if media_item['url']:
+                    # Basic URL cleaning - remove query params like ?tag=10
+                    parsed_url = urlparse(media_item['url'])
+                    cleaned_url = parsed_url._replace(query='').geturl()
+                    media_item['url'] = cleaned_url
+
+                    # Determine extension more reliably
+                    path_part = parsed_url.path
+                    if '.' in path_part:
+                         potential_ext = path_part.split('.')[-1].lower()
+                         if potential_ext in ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'gif']:
+                              media_item['extension'] = potential_ext
+                         elif media_item['type'] == 'photo': # Fallback for photos
+                              media_item['extension'] = 'jpg'
+                         elif media_item['type'] in ['video', 'animated_gif']: # Fallback for videos/gifs
+                              media_item['extension'] = 'mp4'
+
+
                     media_items.append(media_item)
-                    logger.info(f"Found {media_type} URL: {media_item['url']}")
+                    logger.info(f"Found {media_type} URL: {media_item['url']} (Extension: {media_item['extension']})")
                 else:
                     logger.warning(f"Could not extract URL for {media_type} at index {index}")
-            
+
             return media_items
-            
-        except (KeyError, IndexError) as e:
-            logger.error(f"Failed to extract media URLs: {e}")
-            # Log the structure for debugging
-            try:
-                if 'data' in tweet_data and 'threaded_conversation_with_injections_v2' in tweet_data['data']:
-                    instructions = tweet_data['data']['threaded_conversation_with_injections_v2'].get('instructions', [])
-                    if instructions:
-                        logger.debug(f"Instructions count: {len(instructions)}")
-                        if len(instructions) > 0:
-                            entries = instructions[0].get('entries', [])
-                            logger.debug(f"Entries count: {len(entries)}")
-            except Exception as debug_e:
-                logger.error(f"Error while debugging structure: {debug_e}")
-            
-            return []  # Return empty list on error
+
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"Failed to extract media URLs due to path error: {e}", exc_info=True)
+            # Log structure for debugging
+            logger.debug(f"API Data structure (keys): {list(tweet_data.keys())}")
+            if 'data' in tweet_data:
+                 logger.debug(f"API Data['data'] structure (keys): {list(tweet_data['data'].keys())}")
+                 if 'tweetResult' in tweet_data['data']:
+                      logger.debug(f"API Data['data']['tweetResult'] structure (keys): {list(tweet_data['data']['tweetResult'].keys())}")
+
+
+            return [] # Return empty list on error
