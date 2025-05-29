@@ -548,11 +548,70 @@ def main():
 
         # --- Fetch Tasks from "Capture" Project ---
         logger.info("Fetching projects to find 'Capture' project ID...")
-        projects = api.get_projects()
-        capture_project_ids = [p.id for p in projects if p.name.lower() == 'capture']
+        projects_paginator = api.get_projects()
+        
+        # Debug the paginator before conversion
+        logger.debug(f"Projects paginator type: {type(projects_paginator)}")
+        logger.debug(f"Projects paginator: {projects_paginator}")
+        
+        # Convert ResultsPaginator to list
+        try:
+            projects_raw = list(projects_paginator)
+            logger.debug(f"Successfully converted paginator to list. Length: {len(projects_raw)}")
+            
+            # Handle nested list structure if present
+            if len(projects_raw) == 1 and isinstance(projects_raw[0], list):
+                projects = projects_raw[0]  # Flatten the nested list
+                logger.debug(f"Flattened nested list. New length: {len(projects)}")
+            else:
+                projects = projects_raw
+                
+        except Exception as e:
+            logger.error(f"Error converting paginator to list: {e}")
+            # Try alternative approach
+            projects = []
+            try:
+                for project in projects_paginator:
+                    projects.append(project)
+                logger.debug(f"Alternative iteration worked. Length: {len(projects)}")
+            except Exception as e2:
+                logger.error(f"Alternative iteration also failed: {e2}")
+                raise
+        
+        # Debug: inspect the structure of projects to understand the format
+        logger.debug(f"Projects type: {type(projects)}")
+        logger.debug(f"Projects length: {len(projects)}")
+        if projects:
+            logger.debug(f"First project type: {type(projects[0])}")
+            logger.debug(f"First project content: {projects[0]}")
+        
+        # Handle different possible formats from the API
+        capture_project_ids = []
+        try:
+            # Try the expected format (objects with .name and .id attributes)
+            capture_project_ids = [p.id for p in projects if hasattr(p, 'name') and p.name.lower() == 'capture']
+        except AttributeError:
+            # If that fails, try dictionary format
+            try:
+                capture_project_ids = [p['id'] for p in projects if isinstance(p, dict) and p.get('name', '').lower() == 'capture']
+            except (KeyError, TypeError):
+                # If both fail, log the structure and raise a more helpful error
+                logger.error(f"Unexpected projects format. Type: {type(projects)}")
+                if projects:
+                    logger.error(f"First project structure: {projects[0]}")
+                raise ValueError("Unable to parse projects from Todoist API. Please check the API response format.")
 
         if not capture_project_ids:
             logger.error("Fatal: Project named 'Capture' not found in Todoist.")
+            # List available projects for debugging
+            try:
+                if projects and hasattr(projects[0], 'name'):
+                    available_projects = [p.name for p in projects]
+                else:
+                    available_projects = [p.get('name', 'Unknown') for p in projects if isinstance(p, dict)]
+                logger.error(f"Available projects: {available_projects}")
+            except (IndexError, AttributeError):
+                logger.error("Could not list available projects due to format issues.")
             return 1 # Exit if essential project is missing
 
         capture_project_id = capture_project_ids[0]
@@ -562,7 +621,36 @@ def main():
         logger.info(f"Fetching tasks from project ID: {capture_project_id}")
         # Filter tasks by project ID directly if API supports it, otherwise filter after fetching all
         # get_tasks() fetches all active tasks, filter locally.
-        all_active_tasks = api.get_tasks()
+        tasks_paginator = api.get_tasks()
+        
+        # Debug the paginator before conversion
+        logger.debug(f"Tasks paginator type: {type(tasks_paginator)}")
+        
+        # Convert ResultsPaginator to list (same approach as projects)
+        try:
+            tasks_raw = list(tasks_paginator)
+            logger.debug(f"Successfully converted tasks paginator to list. Length: {len(tasks_raw)}")
+            
+            # Handle nested list structure for tasks (same issue as projects)
+            if len(tasks_raw) == 1 and isinstance(tasks_raw[0], list):
+                all_active_tasks = tasks_raw[0]  # Flatten the nested list
+                logger.debug(f"Flattened nested tasks list. Length: {len(all_active_tasks)}")
+            else:
+                all_active_tasks = tasks_raw
+                logger.debug(f"Tasks not nested, using direct list. Length: {len(all_active_tasks)}")
+                
+        except Exception as e:
+            logger.error(f"Error converting tasks paginator to list: {e}")
+            # Try alternative approach
+            all_active_tasks = []
+            try:
+                for task in tasks_paginator:
+                    all_active_tasks.append(task)
+                logger.debug(f"Alternative tasks iteration worked. Length: {len(all_active_tasks)}")
+            except Exception as e2:
+                logger.error(f"Alternative tasks iteration also failed: {e2}")
+                raise
+            
         tasks_in_capture = [t for t in all_active_tasks if t.project_id == capture_project_id]
         stats.total_tasks_considered = len(tasks_in_capture)
         logger.info(f"Found {stats.total_tasks_considered} tasks in 'Capture' project.")
@@ -582,7 +670,20 @@ def main():
         if not tasks_to_process_list:
             logger.info("No tasks to process in 'Capture' project (or limit is 0).")
             # Fetch remaining tasks count for summary
-            final_tasks_in_capture = [t for t in api.get_tasks() if t.project_id == capture_project_id]
+            final_tasks_paginator = api.get_tasks()
+            
+            # Apply same flattening logic as before
+            try:
+                final_tasks_raw = list(final_tasks_paginator)
+                if len(final_tasks_raw) == 1 and isinstance(final_tasks_raw[0], list):
+                    final_all_tasks = final_tasks_raw[0]  # Flatten the nested list
+                else:
+                    final_all_tasks = final_tasks_raw
+            except Exception as e:
+                logger.warning(f"Could not fetch final task count: {e}")
+                final_all_tasks = []
+            
+            final_tasks_in_capture = [t for t in final_all_tasks if t.project_id == capture_project_id]
             stats.tasks_remaining_in_capture = len(final_tasks_in_capture)
             stats.print_summary()
             return 0
@@ -659,7 +760,20 @@ def main():
 
         # --- Final Summary ---
         # Fetch final count of tasks remaining in Capture
-        final_tasks_in_capture = [t for t in api.get_tasks() if t.project_id == capture_project_id]
+        final_tasks_paginator = api.get_tasks()
+        
+        # Apply same flattening logic as before
+        try:
+            final_tasks_raw = list(final_tasks_paginator)
+            if len(final_tasks_raw) == 1 and isinstance(final_tasks_raw[0], list):
+                final_all_tasks = final_tasks_raw[0]  # Flatten the nested list
+            else:
+                final_all_tasks = final_tasks_raw
+        except Exception as e:
+            logger.warning(f"Could not fetch final task count: {e}")
+            final_all_tasks = []
+            
+        final_tasks_in_capture = [t for t in final_all_tasks if t.project_id == capture_project_id]
         stats.tasks_remaining_in_capture = len(final_tasks_in_capture)
         stats.print_summary()
         
