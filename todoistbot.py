@@ -135,6 +135,75 @@ def setup_logging(verbose=False):
 # Initialize logging with default settings
 logger = setup_logging()
 
+def extract_tasks_from_paginated_response(tasks_paginator, logger):
+    """
+    Helper function to extract tasks from Todoist API paginated response.
+    Handles different response formats and nesting structures.
+    
+    Args:
+        tasks_paginator: Todoist API paginator object
+        logger: Logger instance for debugging
+        
+    Returns:
+        List of task objects
+    """
+    try:
+        tasks_raw = list(tasks_paginator)
+        logger.debug(f"Successfully converted tasks paginator to list. Length: {len(tasks_raw)}")
+        
+        # If we get a single paginated response object
+        if len(tasks_raw) == 1:
+            single_item = tasks_raw[0]
+            
+            # Check if it's a paginated response object with 'results' attribute
+            if hasattr(single_item, 'results'):
+                all_tasks = single_item.results
+                logger.debug(f"Extracted tasks from paginated response object. Length: {len(all_tasks)}")
+                return all_tasks
+            # Check if it's a dictionary with 'results' key
+            elif isinstance(single_item, dict) and 'results' in single_item:
+                all_tasks = single_item['results']
+                logger.debug(f"Extracted tasks from dict response. Length: {len(all_tasks)}")
+                return all_tasks
+            # Check if it's a list of tasks
+            elif isinstance(single_item, list):
+                all_tasks = single_item
+                logger.debug(f"Flattened nested tasks list. Length: {len(all_tasks)}")
+                return all_tasks
+        
+        # If we get multiple items, check if any are paginated responses
+        all_tasks = []
+        for item in tasks_raw:
+            if hasattr(item, 'results'):
+                all_tasks.extend(item.results)
+                logger.debug(f"Found paginated response object, extracted {len(item.results)} tasks")
+            elif isinstance(item, dict) and 'results' in item:
+                all_tasks.extend(item['results'])
+                logger.debug(f"Found dict response, extracted {len(item['results'])} tasks")
+            elif isinstance(item, list):
+                all_tasks.extend(item)
+                logger.debug(f"Found list, extracted {len(item)} tasks")
+            else:
+                # Individual task object
+                all_tasks.append(item)
+                logger.debug(f"Found individual task object")
+        
+        logger.debug(f"Total tasks extracted: {len(all_tasks)}")
+        return all_tasks
+        
+    except Exception as e:
+        logger.error(f"Error converting tasks paginator to list: {e}")
+        # Try alternative approach
+        all_tasks = []
+        try:
+            for task in tasks_paginator:
+                all_tasks.append(task)
+            logger.debug(f"Alternative tasks iteration worked. Length: {len(all_tasks)}")
+            return all_tasks
+        except Exception as e2:
+            logger.error(f"Alternative tasks iteration also failed: {e2}")
+            raise
+
 class TaskStats:
     def __init__(self):
         self.total_tasks_considered = 0 # Tasks initially fetched
@@ -626,31 +695,9 @@ def main():
         # Debug the paginator before conversion
         logger.debug(f"Tasks paginator type: {type(tasks_paginator)}")
         
-        # Convert ResultsPaginator to list (same approach as projects)
-        try:
-            tasks_raw = list(tasks_paginator)
-            logger.debug(f"Successfully converted tasks paginator to list. Length: {len(tasks_raw)}")
-            
-            # Handle nested list structure for tasks (same issue as projects)
-            if len(tasks_raw) == 1 and isinstance(tasks_raw[0], list):
-                all_active_tasks = tasks_raw[0]  # Flatten the nested list
-                logger.debug(f"Flattened nested tasks list. Length: {len(all_active_tasks)}")
-            else:
-                all_active_tasks = tasks_raw
-                logger.debug(f"Tasks not nested, using direct list. Length: {len(all_active_tasks)}")
-                
-        except Exception as e:
-            logger.error(f"Error converting tasks paginator to list: {e}")
-            # Try alternative approach
-            all_active_tasks = []
-            try:
-                for task in tasks_paginator:
-                    all_active_tasks.append(task)
-                logger.debug(f"Alternative tasks iteration worked. Length: {len(all_active_tasks)}")
-            except Exception as e2:
-                logger.error(f"Alternative tasks iteration also failed: {e2}")
-                raise
-            
+        # Use helper function to extract tasks from paginated response
+        all_active_tasks = extract_tasks_from_paginated_response(tasks_paginator, logger)
+
         tasks_in_capture = [t for t in all_active_tasks if t.project_id == capture_project_id]
         stats.total_tasks_considered = len(tasks_in_capture)
         logger.info(f"Found {stats.total_tasks_considered} tasks in 'Capture' project.")
@@ -672,13 +719,9 @@ def main():
             # Fetch remaining tasks count for summary
             final_tasks_paginator = api.get_tasks()
             
-            # Apply same flattening logic as before
+            # Use helper function to extract tasks from paginated response
             try:
-                final_tasks_raw = list(final_tasks_paginator)
-                if len(final_tasks_raw) == 1 and isinstance(final_tasks_raw[0], list):
-                    final_all_tasks = final_tasks_raw[0]  # Flatten the nested list
-                else:
-                    final_all_tasks = final_tasks_raw
+                final_all_tasks = extract_tasks_from_paginated_response(final_tasks_paginator, logger)
             except Exception as e:
                 logger.warning(f"Could not fetch final task count: {e}")
                 final_all_tasks = []
@@ -762,13 +805,9 @@ def main():
         # Fetch final count of tasks remaining in Capture
         final_tasks_paginator = api.get_tasks()
         
-        # Apply same flattening logic as before
+        # Use helper function to extract tasks from paginated response
         try:
-            final_tasks_raw = list(final_tasks_paginator)
-            if len(final_tasks_raw) == 1 and isinstance(final_tasks_raw[0], list):
-                final_all_tasks = final_tasks_raw[0]  # Flatten the nested list
-            else:
-                final_all_tasks = final_tasks_raw
+            final_all_tasks = extract_tasks_from_paginated_response(final_tasks_paginator, logger)
         except Exception as e:
             logger.warning(f"Could not fetch final task count: {e}")
             final_all_tasks = []
