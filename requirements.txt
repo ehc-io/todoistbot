@@ -1,0 +1,17 @@
+todoist-api-python
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+youtube-transcript-api
+playwright
+tqdm
+litellm
+pypandoc
+html2text
+PyPDF2
+beautifulsoup4
+boto3
+pytubefix
+tokenizers==0.19.1
+attrs>=21.2.0,<22.0.0
