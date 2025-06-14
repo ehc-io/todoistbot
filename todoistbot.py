@@ -522,7 +522,7 @@ def process_single_task(api: TodoistAPI, task, args, url_db=None) -> Optional[di
                 api.update_task(task_id=task_id, labels=updated_labels)
         elif not args.no_close: # Success and closing is enabled
             logger.info(f"  Marking task {task_id} as complete.")
-            api.close_task(task_id=task_id)
+            api.complete_task(task_id=task_id)
             final_status = 'closed'
         else: # Success but closing disabled
             logger.info(f"  Task {task_id} processed successfully, not closing (--no-close).")
