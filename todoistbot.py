@@ -19,6 +19,8 @@ from common import generate_markdown
 from url_scraper import URLScraper
 # --- Import the YouTube extractor directly ---
 from yt_extractor import YouTubeDataFetcher, enhance_youtube_processing
+# --- Import the Google Drive uploader ---
+from gdrive_uploader import upload_to_gdrive
 # ---
 
 import logging # Ensure logging is used
@@ -549,7 +551,11 @@ def main():
     parser.add_argument('--max-tasks', type=int, default=None, help='Maximum number of tasks to process (default: all)')
     parser.add_argument('--text-model', type=str, default='ollama/llama3.2:3b', help='Text model for summarization (e.g., ollama/llama3.2:3b, openai/gpt-3.5-turbo)') # Updated default
     parser.add_argument('--vision-model', type=str, default='ollama/llava:13b', help='Vision model (usage reduced, kept for potential future use)') # Updated default
-    parser.add_argument('--screen', action='store_true', help='Display markdown output to screen instead of saving to file')
+    parser.add_argument('--screen', action='store_true', help='Display markdown output to screen instead of saving to a file or uploading.')
+
+    # Report destination arguments
+    parser.add_argument('--no-gdrive-upload', action='store_true', help='Disable uploading the report to Google Drive and save it locally instead.')
+    parser.add_argument('--gdrive-folder-id', type=str, default=os.getenv('GOOGLE_DRIVE_CAPTURE_FOLDER_ID'), help='Google Drive folder ID for uploads. Defaults to GOOGLE_DRIVE_CAPTURE_FOLDER_ID environment variable.')
 
     # URL deduplication arguments
     parser.add_argument('--no-deduplication', action='store_true', 
@@ -775,8 +781,40 @@ def main():
                 print(markdown_content)
                 print("\n" + "="*80)
                 logger.info("Output displayed to screen.")
+            elif not args.no_gdrive_upload:
+                # --- Upload to Google Drive (Default) ---
+                if not args.gdrive_folder_id:
+                    logger.error("Google Drive upload is enabled but no folder ID was provided.")
+                    logger.error("Please provide a folder ID via the --gdrive-folder-id argument or by setting the GOOGLE_DRIVE_CAPTURE_FOLDER_ID environment variable.")
+                    return 1 # Exit with an error
+                
+                # Save the report to a temporary local file first
+                temp_dir = Path(__file__).parent / "temp_reports"
+                temp_dir.mkdir(exist_ok=True)
+                filename = f"{int(time.time())}-capture-report.md"
+                temp_file_path = temp_dir / filename
+                
+                try:
+                    with open(temp_file_path, 'w', encoding='utf-8') as f:
+                        f.write(markdown_content)
+                    
+                    # Upload the temporary file to Google Drive
+                    logger.info(f"Uploading report to Google Drive folder: {args.gdrive_folder_id}")
+                    upload_to_gdrive(str(temp_file_path), args.gdrive_folder_id)
+                    
+                except Exception as e:
+                    logger.error(f"An error occurred during the report generation or upload process: {e}")
+                finally:
+                    # Clean up the temporary file
+                    if os.path.exists(temp_file_path):
+                        try:
+                            os.remove(temp_file_path)
+                            logger.debug(f"Removed temporary report file: {temp_file_path}")
+                        except OSError as e:
+                            logger.error(f"Error removing temporary file {temp_file_path}: {e}")
+
             else:
-                # Determine save directory (Environment variable or default)
+                # --- Save Locally (Fallback when --no-gdrive-upload is used) ---
                 save_dir_env = os.getenv('CAPTURED_NOTES_FOLDER')
                 if save_dir_env and Path(save_dir_env).is_dir():
                      save_dir = Path(save_dir_env)
@@ -792,7 +830,7 @@ def main():
                 try:
                     with open(file_path, 'w', encoding='utf-8') as f:
                         f.write(markdown_content)
-                    logger.info(f"✓ Report saved successfully to: {file_path}")
+                    logger.info(f"✓ Report saved locally to: {file_path}")
                 except IOError as e:
                     logger.error(f"✕ Failed to save report to {file_path}: {e}")
                     # Print to screen as fallback?
