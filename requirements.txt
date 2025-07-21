@@ -14,4 +14,6 @@ beautifulsoup4
 boto3
 pytubefix
 tokenizers==0.19.1
-attrs>=21.2.0,<22.0.0
+attrs>=21.2.0,<22.0.0google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
