@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import tempfile
+import shutil
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -404,7 +405,7 @@ def _process_and_upload_media(
             local_path = None
             if save_media_locally:
                 local_path = Path(media_output_dir) / filename
-                os.rename(tmp_file_path, local_path)
+                shutil.move(tmp_file_path, local_path)
                 media_results["local_paths"].append(str(local_path))
                 logger.info(f"Downloaded media to {local_path}")
             
