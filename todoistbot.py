@@ -23,6 +23,9 @@ from yt_extractor import YouTubeDataFetcher, enhance_youtube_processing
 from gdrive_uploader import upload_to_gdrive
 # ---
 
+# --- Import Twitter Thread Scraper ---
+from thread_tweet_counter import ThreadScraper, format_tweet_thread_output
+
 import logging # Ensure logging is used
 
 def setup_logging(verbose=False):
@@ -414,6 +417,46 @@ def process_single_task(api: TodoistAPI, task, args, url_db=None) -> Optional[di
                     if url_db:
                         url_db.add_url(url, task_id=task_id, success=False)
                 
+            # --- Handle Twitter/X URLs with ThreadScraper ---
+            elif "twitter.com" in url or "x.com" in url:
+                logger.info(f"Processing Twitter/X URL: {url}")
+                try:
+                    thread_scraper = ThreadScraper(
+                        url,
+                        save_media_locally=args.save_media_locally,
+                        s3_upload=args.s3_upload,
+                        s3_bucket=args.s3_bucket,
+                        media_output_dir=args.output_dir
+                    )
+                    tweets = thread_scraper.scrape_thread()
+                    if tweets:
+                        # Format the output using the imported function
+                        formatted_content = format_tweet_thread_output(tweets, url)
+                        scrape_result = {
+                            'url': url,
+                            'type': 'twitter_thread',
+                            'content': formatted_content,
+                            'error': None
+                        }
+                        any_scrape_successful = True
+                        processed_url_results.append(scrape_result)
+                        logger.info(f"  ✓ Successfully processed Twitter thread: {url}")
+                        if url_db:
+                            url_db.add_url(url, task_id=task_id, success=True)
+                    else:
+                        scrape_result = {'url': url, 'error': 'Thread scraper returned no tweets.', 'content': '[Error: Could not scrape thread]'}
+                        processed_url_results.append(scrape_result)
+                        logger.warning(f"  ⚠ Thread scraper returned no tweets for: {url}")
+                        if url_db:
+                            url_db.add_url(url, task_id=task_id, success=False)
+
+                except Exception as e:
+                    scrape_result = {'url': url, 'error': f'Error during thread scraping: {str(e)}', 'content': f'[Error: {str(e)}]'}
+                    processed_url_results.append(scrape_result)
+                    logger.error(f"  ✕ Exception while scraping Twitter thread {url}: {e}", exc_info=True)
+                    if url_db:
+                        url_db.add_url(url, task_id=task_id, success=False)
+
             # Skip YouTube handling in URL scraper by using a custom processing wrapper
             else:
                 # For non-YouTube URLs, use the existing scrape_url method
